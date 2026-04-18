@@ -68,6 +68,13 @@ jobs:
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
 
+    # id-token:write is required for npm provenance attestation.
+    # provenance cryptographically links published packages to this exact
+    # workflow run + commit, verifiable via `npm audit signatures`.
+    permissions:
+      contents: read
+      id-token: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -101,16 +108,14 @@ jobs:
       - name: Publish platform packages
         run: |
           for dir in npm/*/; do
-            cd "$dir"
-            npm publish --access public || true
-            cd ../..
+            (cd "$dir" && npm publish --access public --provenance) || true
           done
         working-directory: crates/side-huddle-node
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
-        run: npm publish --access public
+        run: npm publish --access public --provenance
         working-directory: crates/side-huddle-node
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
