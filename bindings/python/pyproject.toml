@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name        = "side-huddle"
 description = "Detect Teams / Zoom / Google Meet meetings and capture audio as WAV"
-readme      = { file = "../../README.md", content-type = "text/markdown" }
+readme      = { file = "README.md", content-type = "text/markdown" }
 license     = { text = "MIT" }
 authors     = [{ name = "Ken Chau", email = "kchau@microsoft.com" }]
 requires-python = ">=3.9"
