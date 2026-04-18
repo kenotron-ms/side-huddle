@@ -1,6 +1,6 @@
 {
   "name": "side-huddle",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Detect meetings locally and capture audio as WAV",
   "main": "index.js",
   "napi": {
@@ -21,9 +21,9 @@
     "@napi-rs/cli": "^2.18.4"
   },
   "optionalDependencies": {
-    "side-huddle-darwin-arm64": "0.1.1",
-    "side-huddle-darwin-x64": "0.1.1",
-    "side-huddle-linux-x64-gnu": "0.1.1",
-    "side-huddle-win32-x64-msvc": "0.1.1"
+    "side-huddle-darwin-arm64": "0.1.2",
+    "side-huddle-darwin-x64": "0.1.2",
+    "side-huddle-linux-x64-gnu": "0.1.2",
+    "side-huddle-win32-x64-msvc": "0.1.2"
   }
 }

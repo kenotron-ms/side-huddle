@@ -26,6 +26,14 @@
 
     pub use recorder::MeetingListener;
 
+    /// Window utilities re-exported for use from examples and external consumers.
+    #[cfg(target_os = "macos")]
+    pub mod window {
+        pub use crate::platform::darwin::window::{
+            cg_window_owner, find_primary_window, window_bounds, window_exists,
+        };
+    }
+
     // ── Public event type ─────────────────────────────────────────────────────
 
     /// All events emitted by [`MeetingListener`].

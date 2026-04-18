@@ -171,7 +171,7 @@
     /// windows, so a PID-level audio check always returns false during a call.
     /// The caller (WindowWatcher) already knows a meeting is active because
     /// `fire_meeting_started` ran; we just need the right window to watch.
-    pub(crate) fn find_primary_window(owner_substr: &str) -> Option<(u32, String)> {
+    pub fn find_primary_window(owner_substr: &str) -> Option<(u32, String)> {
         let array_ref: CFArrayRef = unsafe {
             CGWindowListCopyWindowInfo(
                 (CG_ON_SCREEN_ONLY | CG_EXCL_DESKTOP) as _,
@@ -222,7 +222,7 @@
 
     /// Returns `true` if a window with `window_id` is still present in the full
     /// window list (including hidden windows).
-    pub(crate) fn window_exists(window_id: u32) -> bool {
+    pub fn window_exists(window_id: u32) -> bool {
         let array_ref: CFArrayRef = unsafe {
             CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID) as CFArrayRef
         };
@@ -241,11 +241,46 @@
         found
     }
 
+    /// Returns the bounds `(x, y, width, height)` of a window by ID.
+    /// Uses the full window list (including hidden windows) so it works even
+    /// when the window is not currently on screen.
+    pub fn window_bounds(window_id: u32) -> Option<(f64, f64, f64, f64)> {
+        let array_ref: CFArrayRef = unsafe {
+            CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID) as CFArrayRef
+        };
+        if array_ref.is_null() { return None; }
+
+        let count = unsafe { CFArrayGetCount(array_ref) };
+        let mut result = None;
+
+        for i in 0..count {
+            let item = unsafe { CFArrayGetValueAtIndex(array_ref, i) };
+            if item.is_null() { continue; }
+            let dict = item as CFDictionaryRef;
+            let Some(id) = dict_get_i32(dict, "kCGWindowNumber") else { continue };
+            if id as u32 != window_id { continue; }
+
+            let cf_key = CFString::new("kCGWindowBounds");
+            let bd = unsafe { CFDictionaryGetValue(dict, cf_key.as_concrete_TypeRef() as *const c_void) };
+            if bd.is_null() { break; }
+            let bd = bd as CFDictionaryRef;
+            let x = dict_get_f64(bd, "X").unwrap_or(0.0);
+            let y = dict_get_f64(bd, "Y").unwrap_or(0.0);
+            let w = dict_get_f64(bd, "Width").unwrap_or(0.0);
+            let h = dict_get_f64(bd, "Height").unwrap_or(0.0);
+            result = Some((x, y, w, h));
+            break;
+        }
+
+        unsafe { CFRelease(array_ref as CFTypeRef); }
+        result
+    }
+
     /// Converts a friendly meeting-app name to the CGWindowOwnerName substring
     /// used to match its windows in `CGWindowListCopyWindowInfo`.
     ///
     /// Mirrors Go's `cgWindowOwner()` in window_darwin.go exactly.
-    pub(crate) fn cg_window_owner(app: &str) -> String {
+    pub fn cg_window_owner(app: &str) -> String {
         let lower = app.to_lowercase();
         if lower.contains("teams")                              { return "Microsoft Teams".into(); }
         if lower.contains("zoom")                               { return "zoom.us".into(); }

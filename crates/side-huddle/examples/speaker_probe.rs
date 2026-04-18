@@ -21,7 +21,8 @@ use core_foundation_sys::dictionary::{CFDictionaryRef, CFDictionaryGetValue};
 use core_foundation_sys::number::{CFNumberGetValue, CFNumberRef, kCFNumberFloat64Type, kCFNumberSInt32Type};
 use core_foundation_sys::string::{CFStringGetCString, CFStringRef, kCFStringEncodingUTF8};
 use core_graphics::geometry::CGRect;
-use core_graphics::window::{kCGNullWindowID, kCGWindowListOptionAll, CGWindowListCopyWindowInfo};
+use core_graphics::window::{kCGNullWindowID, kCGWindowListOptionAll, CGWindowListCopyWindowInfo}; // still used by get_* helpers
+use side_huddle::window::{cg_window_owner, find_primary_window, window_bounds};
 
 // ── CoreGraphics raw bindings ─────────────────────────────────────────────────
 //
@@ -121,37 +122,19 @@ fn cg_image_to_rgba(img: CGImageRef) -> Option<(Vec<u8>, i32, i32)> {
 
 struct WinInfo { id: u32, x: f64, y: f64, w: f64, h: f64 }
 
-fn find_meeting_window(owner_pid: i32) -> Option<WinInfo> {
-    let list = unsafe { CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID) };
-    if list.is_null() { return None; }
-    let n = unsafe { CFArrayGetCount(list as _) };
-    let mut best: Option<(f64, WinInfo)> = None;
+fn find_meeting_window(_pid: i32, _debug: bool) -> Option<WinInfo> {
+    // Delegate to the core lib's window detector — same logic used by MeetingListener
+    let owner = cg_window_owner("teams");           // → "Microsoft Teams"
+    let (win_id, _title) = find_primary_window(&owner)?;
+    let (x, y, w, h) = window_bounds(win_id)?;
 
-    for i in 0..n {
-        let item = unsafe { CFArrayGetValueAtIndex(list as _, i) } as CFDictionaryRef;
-        if item.is_null() { continue; }
-        if get_i32(item, "kCGWindowLayer") != 0 { continue; }
+    // Verify this window is actually capturable — WebView sandbox windows look
+    // identical in the CGWindowList metadata but CGWindowListCreateImage returns
+    // null for them. Test once and skip if it fails.
+    let img = capture_window_cg(win_id)?;
+    unsafe { CGImageRelease(img); }
 
-        // Must match the main Teams PID — filters out WebView subprocess windows
-        // which CGWindowListCreateImage cannot capture
-        let win_pid = get_i32(item, "kCGWindowOwnerPID");
-        if win_pid != owner_pid { continue; }
-
-        let bd_key = CFString::new("kCGWindowBounds");
-        let bd_val = unsafe { CFDictionaryGetValue(item, bd_key.as_concrete_TypeRef() as *const c_void) };
-        if bd_val.is_null() { continue; }
-        let bd = bd_val as CFDictionaryRef;
-        let (x, y, w, h) = (get_f64(bd,"X"), get_f64(bd,"Y"), get_f64(bd,"Width"), get_f64(bd,"Height"));
-        let area = w * h;
-        if area < 10_000.0 { continue; }
-        let id = get_i32(item, "kCGWindowNumber") as u32;
-        if id == 0 { continue; }
-        if best.as_ref().map_or(true, |(a,_)| area > *a) {
-            best = Some((area, WinInfo { id, x, y, w, h }));
-        }
-    }
-    unsafe { CFRelease(list as CFTypeRef); }
-    best.map(|(_,w)| w)
+    Some(WinInfo { id: win_id, x, y, w, h })
 }
 
 fn get_i32(d: CFDictionaryRef, k: &str) -> i32 {
@@ -182,7 +165,7 @@ fn get_str(d: CFDictionaryRef, k: &str) -> Option<String> {
 // ── Snapshot ──────────────────────────────────────────────────────────────────
 
 fn snapshot(pid: i32, save: bool) -> Vec<String> {
-    let win = match find_meeting_window(pid) {
+    let win = match find_meeting_window(pid, save) {
         Some(w) => w,
         None => { eprintln!("No Teams window found for pid={pid}"); return vec![]; }
     };

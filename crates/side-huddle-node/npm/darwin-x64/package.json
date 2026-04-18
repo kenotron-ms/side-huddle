@@ -1,6 +1,6 @@
 {
   "name": "side-huddle-darwin-x64",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Detect meetings locally and capture audio as WAV",
   "os": [
     "darwin"
