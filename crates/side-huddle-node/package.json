@@ -6,7 +6,10 @@
   "napi": {
     "name": "side-huddle-node",
     "triples": {
-      "defaults": true
+      "defaults": true,
+      "additional": [
+        "aarch64-apple-darwin"
+      ]
     }
   },
   "scripts": {
@@ -20,6 +23,7 @@
   "optionalDependencies": {
     "@kenotron-ms/side-huddle-win32-x64-msvc": "0.1.0",
     "@kenotron-ms/side-huddle-darwin-x64": "0.1.0",
-    "@kenotron-ms/side-huddle-linux-x64-gnu": "0.1.0"
+    "@kenotron-ms/side-huddle-linux-x64-gnu": "0.1.0",
+    "@kenotron-ms/side-huddle-darwin-arm64": "0.1.0"
   }
 }
