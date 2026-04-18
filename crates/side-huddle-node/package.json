@@ -14,8 +14,7 @@
   },
   "scripts": {
     "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "prepublishOnly": "napi build --platform --release"
+    "build:debug": "napi build --platform"
   },
   "devDependencies": {
     "@napi-rs/cli": "^2.18.4"
@@ -24,5 +23,9 @@
     "side-huddle-darwin-arm64": "0.1.2",
     "side-huddle-linux-x64-gnu": "0.1.2",
     "side-huddle-win32-x64-msvc": "0.1.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kenotron-ms/side-huddle.git"
   }
 }
