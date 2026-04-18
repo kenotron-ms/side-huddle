@@ -1257,6 +1257,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "screencapturekit"
+version = "1.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "99b732b2db50b25cfbcb171e1b7abda06e77873aeef493e635eb209482fdd149"
+
+[[package]]
 name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1330,6 +1336,7 @@ dependencies = [
  "objc2-core-audio",
  "objc2-core-audio-types",
  "objc2-foundation",
+ "screencapturekit",
  "serde_json",
  "sysinfo",
  "thiserror 2.0.18",

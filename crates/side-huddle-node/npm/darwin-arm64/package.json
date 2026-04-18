@@ -1,0 +1,20 @@
+{
+  "name": "@kenotron-ms/side-huddle-darwin-arm64",
+  "version": "0.1.0",
+  "description": "Detect meetings locally and capture audio as WAV",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "main": "side-huddle-node.darwin-arm64.node",
+  "files": [
+    "side-huddle-node.darwin-arm64.node"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kenotron-ms/side-huddle.git"
+  }
+}

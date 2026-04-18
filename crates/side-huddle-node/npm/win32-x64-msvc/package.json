@@ -1,0 +1,20 @@
+{
+  "name": "@kenotron-ms/side-huddle-win32-x64-msvc",
+  "version": "0.1.0",
+  "description": "Detect meetings locally and capture audio as WAV",
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "side-huddle-node.win32-x64-msvc.node",
+  "files": [
+    "side-huddle-node.win32-x64-msvc.node"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kenotron-ms/side-huddle.git"
+  }
+}
