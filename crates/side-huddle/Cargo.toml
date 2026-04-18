@@ -1,0 +1,65 @@
+[package]
+name                  = "side-huddle"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+description.workspace = true
+authors.workspace     = true
+repository.workspace  = true
+homepage.workspace    = true
+keywords.workspace    = true
+categories.workspace  = true
+readme                = "../../README.md"
+documentation         = "https://docs.rs/side-huddle"
+
+[package.metadata.docs.rs]
+# docs.rs builds on Linux; all macOS-specific code is gated behind cfg
+targets        = ["x86_64-unknown-linux-gnu"]
+default-target = "x86_64-unknown-linux-gnu"
+
+[lib]
+# rlib   — Rust dependents
+# cdylib — C / Go / Python FFI consumers
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+crossbeam-channel = { workspace = true }
+log               = { workspace = true }
+thiserror         = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+coreaudio-sys          = { version = "0.2", features = ["audio_toolbox", "core_audio"] }
+objc2                  = "0.6"
+objc2-core-audio       = "0.3"
+objc2-core-audio-types = "0.3"
+objc2-foundation       = { version = "0.3", features = ["NSArray", "NSString", "NSDictionary", "NSUUID", "NSError"] }
+core-graphics          = "0.25"
+core-foundation        = "0.10"
+core-foundation-sys    = "0.8"
+dispatch2              = "0.3"
+libc                   = "0.2"
+cpal                   = "0.17"
+uuid                   = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_Foundation",
+] }
+sysinfo = "0.33"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+sysinfo = "0.33"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
+[dev-dependencies]
+env_logger = "0.11"
+ctrlc      = "3"
+chrono     = "0.4"
+ureq       = "3"
+serde_json = "1"

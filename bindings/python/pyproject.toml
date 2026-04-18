@@ -1,0 +1,37 @@
+[build-system]
+    requires      = ["setuptools>=61", "wheel"]
+    build-backend = "setuptools.backends.legacy:build"
+
+    [project]
+    name        = "sidehuddle"
+    version     = "0.1.0"
+    description = "Detect Teams / Zoom / Google Meet meetings and capture audio as WAV"
+    readme      = { file = "../../README.md", content-type = "text/markdown" }
+    license     = { text = "MIT" }
+    authors     = [{ name = "Ken Chau", email = "kchau@microsoft.com" }]
+    requires-python = ">=3.9"
+    keywords    = ["meetings", "audio", "recording", "teams", "zoom", "google-meet"]
+    classifiers = [
+        "Development Status :: 3 - Alpha",
+        "Intended Audience :: Developers",
+        "License :: OSI Approved :: MIT License",
+        "Operating System :: MacOS",
+        "Programming Language :: Python :: 3",
+        "Topic :: Multimedia :: Sound/Audio :: Capture/Recording",
+    ]
+
+    # No Python dependencies — ctypes is stdlib.
+    # Requires libside_huddle (built from this repo):
+    #   cargo build --release
+    dependencies = []
+
+    [project.urls]
+    Homepage      = "https://github.com/kenotron-ms/side-huddle"
+    Documentation = "https://github.com/kenotron-ms/side-huddle/blob/main/docs/python.md"
+    Repository    = "https://github.com/kenotron-ms/side-huddle"
+    "Bug Tracker" = "https://github.com/kenotron-ms/side-huddle/issues"
+
+    [tool.setuptools.packages.find]
+    where   = ["."]
+    include = ["sidehuddle*"]
+    

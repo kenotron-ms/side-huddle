@@ -1,0 +1,17 @@
+[package]
+    name        = "side-huddle-node"
+    version     = "0.1.0"
+    edition     = "2021"
+    publish     = false   # distributed via npm, not crates.io
+
+    [lib]
+    crate-type = ["cdylib"]
+
+    [dependencies]
+    napi        = { version = "2", features = ["napi4"] }
+    napi-derive = "2"
+    side-huddle = { path = "../side-huddle" }
+
+    [build-dependencies]
+    napi-build = "2"
+    

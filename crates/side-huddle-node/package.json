@@ -1,0 +1,25 @@
+{
+  "name": "@kenotron-ms/side-huddle",
+  "version": "0.1.0",
+  "description": "Detect meetings locally and capture audio as WAV",
+  "main": "index.js",
+  "napi": {
+    "name": "side-huddle-node",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi build --platform --release"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.4"
+  },
+  "optionalDependencies": {
+    "@kenotron-ms/side-huddle-win32-x64-msvc": "0.1.0",
+    "@kenotron-ms/side-huddle-darwin-x64": "0.1.0",
+    "@kenotron-ms/side-huddle-linux-x64-gnu": "0.1.0"
+  }
+}
