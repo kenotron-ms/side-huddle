@@ -9,6 +9,7 @@
 //!   cargo run --example speaker_probe -- --save    # save /tmp/teams_frame.ppm
 //!   cargo run --example speaker_probe -- --watch   # poll every 100ms
 
+use std::collections::BTreeSet;
 use std::ffi::{c_void, CString};
 use std::time::Duration;
 
@@ -38,7 +39,7 @@ type CGWindowImageOption = u32;
 const CG_WINDOW_LIST_OPTION_INCLUDING_WINDOW: CGWindowListOption  = 1 << 3;
 const CG_WINDOW_IMAGE_BOUNDS_IGNORE_FRAMING:  CGWindowImageOption = 1 << 0;
 const CG_WINDOW_IMAGE_NOMINAL_RESOLUTION:     CGWindowImageOption = 1 << 2;
-const KCG_BITMAP_BYTE_ORDER_32_BIG:           u32 = 2 << 12;  // kCGBitmapByteOrder32Big
+const KCG_BITMAP_BYTE_ORDER_32_BIG:           u32 = 4 << 12;  // kCGBitmapByteOrder32Big = 16384
 const KCG_IMAGE_ALPHA_PREMULTIPLIED_LAST:     u32 = 1;
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -180,36 +181,54 @@ fn get_str(d: CFDictionaryRef, k: &str) -> Option<String> {
 
 // ── Snapshot ──────────────────────────────────────────────────────────────────
 
-fn snapshot(pid: i32, save: bool) -> Option<String> {
-    let win = find_meeting_window(pid).or_else(|| { eprintln!("No Teams window found for pid={pid}"); None })?;
-
-    let img_ref = capture_window_cg(win.id).or_else(|| { eprintln!("Capture failed"); None })?;
+fn snapshot(pid: i32, save: bool) -> Vec<String> {
+    let win = match find_meeting_window(pid) {
+        Some(w) => w,
+        None => { eprintln!("No Teams window found for pid={pid}"); return vec![]; }
+    };
+    let img_ref = match capture_window_cg(win.id) {
+        Some(r) => r,
+        None => { eprintln!("Capture failed"); return vec![]; }
+    };
     let result = cg_image_to_rgba(img_ref);
     unsafe { CGImageRelease(img_ref); }
-    let (pixels, img_w, img_h) = result.or_else(|| { eprintln!("Pixel extract failed"); None })?;
+    let (pixels, img_w, img_h) = match result {
+        Some(r) => r,
+        None => { eprintln!("Pixel extract failed"); return vec![]; }
+    };
 
     if save { save_ppm(&pixels, img_w as u32, img_h as u32, "/tmp/teams_frame.ppm"); }
 
     let tiles = std::panic::catch_unwind(|| ax_find_tiles(pid)).unwrap_or_default();
-    if tiles.is_empty() { eprintln!("No AXMenuItem tiles — are you in a meeting?"); return None; }
+    if tiles.is_empty() {
+        if save { eprintln!("No AXMenuItem tiles — are you in a meeting?"); }
+        return vec![];
+    }
 
     let scale_x = img_w as f64 / win.w;
     let scale_y = img_h as f64 / win.h;
-    let now = chrono::Local::now().format("%H:%M:%S");
-    println!("[{now}] {} tiles  {}×{}  win@({:.0},{:.0} {}×{})",
-             tiles.len(), img_w, img_h, win.x, win.y, win.w as i32, win.h as i32);
 
-    let mut speaker: Option<String> = None;
+    // In single-shot mode print the full diagnostic table; in watch mode stay quiet
+    if save {
+        let now = chrono::Local::now().format("%H:%M:%S");
+        println!("[{now}] {} tiles  {}×{}  win@({:.0},{:.0} {}×{})",
+                 tiles.len(), img_w, img_h, win.x, win.y, win.w as i32, win.h as i32);
+    }
+
+    // Collect ALL currently-speaking tiles (there can be more than one)
+    let mut speakers: Vec<String> = Vec::new();
     for tile in &tiles {
         let rx = (tile.x - win.x) * scale_x;
         let ry = (tile.y - win.y) * scale_y;
         let (ratio, hex) = sample_border(&pixels, img_w, img_h, rx, ry, tile.w * scale_x, tile.h * scale_y);
         let speaking = ratio > 0.15;
-        println!("  {}  {}", if speaking {"🎤"} else {"  "}, &tile.name[..tile.name.len().min(50)]);
-        println!("     {hex}  chromatic={:.0}%", ratio * 100.0);
-        if speaking { speaker = Some(tile.name.clone()); }
+        if save {
+            println!("  {}  {}", if speaking {"🎤"} else {"  "}, &tile.name[..tile.name.len().min(50)]);
+            println!("     {hex}  chromatic={:.0}%", ratio * 100.0);
+        }
+        if speaking { speakers.push(tile.name.clone()); }
     }
-    speaker
+    speakers
 }
 
 // ── Pixel analysis ────────────────────────────────────────────────────────────
@@ -342,18 +361,39 @@ fn main() {
     println!("Microsoft Teams PID {pid}");
 
     if watch {
-        println!("Polling at 100ms (Ctrl-C to stop)…\n");
-        let mut last: Option<String> = Some("UNINIT".into());
+        println!("Watching for speaker changes (Ctrl-C to stop)…\n");
+        // Use a sentinel that can never match real output so first frame always logs
+        let mut last: BTreeSet<String> = BTreeSet::from(["__UNINIT__".into()]);
+
         loop {
-            let cur = snapshot(pid, false);
+            let cur: BTreeSet<String> = snapshot(pid, false).into_iter().collect();
+
             if cur != last {
-                let now = chrono::Local::now().format("%H:%M:%S");
-                match &cur {
-                    Some(s) => println!("🎤 [{now}] SPEAKING: {s}\n"),
-                    None    => println!("   [{now}] silence\n"),
+                let now = chrono::Local::now().format("%H:%M:%S.%3f");
+
+                if cur.is_empty() {
+                    println!("🔇 [{now}] silence");
+                } else {
+                    // Who joined / who left the speaking set this frame
+                    let joined: Vec<_> = cur.difference(&last).cloned().collect();
+                    let left:   Vec<_> = last.difference(&cur).cloned().collect();
+
+                    // Print the full current speaking set
+                    let names = cur.iter().cloned().collect::<Vec<_>>().join("  +  ");
+                    println!("🎤 [{now}] {names}");
+
+                    // Annotate transitions on the same line suffix
+                    if !joined.is_empty() && last.len() > 0 && !last.contains("__UNINIT__") {
+                        println!("         ↑ joined:  {}", joined.join(", "));
+                    }
+                    if !left.is_empty() {
+                        println!("         ↓ stopped: {}", left.join(", "));
+                    }
                 }
+                println!();
                 last = cur;
             }
+
             std::thread::sleep(Duration::from_millis(100));
         }
     } else {
