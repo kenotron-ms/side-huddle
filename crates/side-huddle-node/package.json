@@ -22,7 +22,6 @@
   },
   "optionalDependencies": {
     "side-huddle-darwin-arm64": "0.1.2",
-    "side-huddle-darwin-x64": "0.1.2",
     "side-huddle-linux-x64-gnu": "0.1.2",
     "side-huddle-win32-x64-msvc": "0.1.2"
   }
