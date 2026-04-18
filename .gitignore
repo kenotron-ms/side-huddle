@@ -58,6 +58,9 @@ build/
 .direnv/
 .envrc
 
+# ── Local scripts (not for CI) ───────────────────────────────────────────────
+scripts/
+
 # ── OS / misc ─────────────────────────────────────────────────────────────────
 Thumbs.db
 ehthumbs.db

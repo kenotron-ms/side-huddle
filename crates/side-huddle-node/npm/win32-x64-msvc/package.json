@@ -1,5 +1,5 @@
 {
-  "name": "@kenotron-ms/side-huddle-win32-x64-msvc",
+  "name": "side-huddle-win32-x64-msvc",
   "version": "0.1.0",
   "description": "Detect meetings locally and capture audio as WAV",
   "os": [

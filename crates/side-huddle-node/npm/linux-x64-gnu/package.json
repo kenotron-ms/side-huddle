@@ -1,5 +1,5 @@
 {
-  "name": "@kenotron-ms/side-huddle-linux-x64-gnu",
+  "name": "side-huddle-linux-x64-gnu",
   "version": "0.1.0",
   "description": "Detect meetings locally and capture audio as WAV",
   "os": [

@@ -92,7 +92,6 @@ fn capture_window_cg(window_id: CGWindowID) -> Option<CGImageRef> {
         window_id,
         CG_WINDOW_IMAGE_BOUNDS_IGNORE_FRAMING | CG_WINDOW_IMAGE_NOMINAL_RESOLUTION,
     )};
-    eprintln!("DEBUG: window_id={window_id} img={img:?}");
     if img.is_null() { None } else { Some(img) }
 }
 
@@ -183,7 +182,6 @@ fn get_str(d: CFDictionaryRef, k: &str) -> Option<String> {
 
 fn snapshot(pid: i32, save: bool) -> Option<String> {
     let win = find_meeting_window(pid).or_else(|| { eprintln!("No Teams window found for pid={pid}"); None })?;
-    eprintln!("Using window id={} {}×{} @{},{}", win.id, win.w as i32, win.h as i32, win.x as i32, win.y as i32);
 
     let img_ref = capture_window_cg(win.id).or_else(|| { eprintln!("Capture failed"); None })?;
     let result = cg_image_to_rgba(img_ref);
@@ -192,7 +190,7 @@ fn snapshot(pid: i32, save: bool) -> Option<String> {
 
     if save { save_ppm(&pixels, img_w as u32, img_h as u32, "/tmp/teams_frame.ppm"); }
 
-    let tiles = ax_find_tiles(pid);
+    let tiles = std::panic::catch_unwind(|| ax_find_tiles(pid)).unwrap_or_default();
     if tiles.is_empty() { eprintln!("No AXMenuItem tiles — are you in a meeting?"); return None; }
 
     let scale_x = img_w as f64 / win.w;
@@ -276,14 +274,18 @@ fn ax_find_tiles(pid: i32) -> Vec<Tile> {
         CFRelease(v);
         if ok { Some(out) } else { None }
     }
-    unsafe fn ax_kids(el: AXUIElementRef) -> Vec<AXUIElementRef> {
+    unsafe fn ax_kids(el: AXUIElementRef) -> (core_foundation_sys::array::CFArrayRef, Vec<AXUIElementRef>) {
         let cf = CFString::new("AXChildren");
         let mut v: CFTypeRef = std::ptr::null_mut();
-        if AXUIElementCopyAttributeValue(el, cf.as_concrete_TypeRef(), &mut v) != 0 || v.is_null() { return vec![]; }
+        if AXUIElementCopyAttributeValue(el, cf.as_concrete_TypeRef(), &mut v) != 0 || v.is_null() {
+            return (std::ptr::null(), vec![]);
+        }
         let arr = v as core_foundation_sys::array::CFArrayRef;
-        let kids: Vec<_> = (0..CFArrayGetCount(arr)).map(|i| CFArrayGetValueAtIndex(arr, i) as AXUIElementRef).collect();
-        CFRelease(v);
-        kids
+        // Don't release the array — caller releases it after using children
+        let kids: Vec<_> = (0..CFArrayGetCount(arr))
+            .map(|i| CFArrayGetValueAtIndex(arr, i) as AXUIElementRef)
+            .collect();
+        (arr, kids)
     }
     unsafe fn recurse(el: AXUIElementRef, depth: usize, out: &mut Vec<Tile>) {
         if depth > 25 { return; }
@@ -294,7 +296,9 @@ fn ax_find_tiles(pid: i32) -> Vec<Tile> {
                 if s.w > 10.0 && s.h > 10.0 { out.push(Tile { name, x:p.x, y:p.y, w:s.w, h:s.h }); }
             }
         }
-        for kid in ax_kids(el) { recurse(kid, depth+1, out); }
+        let (arr, kids) = ax_kids(el);
+        for kid in kids { recurse(kid, depth+1, out); }
+        if !arr.is_null() { CFRelease(arr as CFTypeRef); }
     }
     let mut tiles = Vec::new();
     unsafe {

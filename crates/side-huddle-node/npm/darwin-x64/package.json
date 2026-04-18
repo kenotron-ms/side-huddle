@@ -1,5 +1,5 @@
 {
-  "name": "@kenotron-ms/side-huddle-darwin-x64",
+  "name": "side-huddle-darwin-x64",
   "version": "0.1.0",
   "description": "Detect meetings locally and capture audio as WAV",
   "os": [
