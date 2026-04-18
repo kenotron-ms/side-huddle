@@ -80,7 +80,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24           # npm trusted publishing requires Node 24+ (or npm 11.5.1+)
           registry-url: https://registry.npmjs.org/
 
       - uses: dtolnay/rust-toolchain@stable
@@ -111,14 +111,10 @@ jobs:
             (cd "$dir" && npm publish --access public --provenance) || true
           done
         working-directory: crates/side-huddle-node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish main package
         run: npm publish --access public --provenance
         working-directory: crates/side-huddle-node
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       # ── crates.io (trusted publishing — no stored token needed) ────────────
       - name: Authenticate with crates.io via OIDC
