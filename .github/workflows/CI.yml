@@ -18,13 +18,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest       # arm64 runner
+          - os: macos-latest
             target: aarch64-apple-darwin
             artifact: side-huddle-node.darwin-arm64.node
 
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             artifact: side-huddle-node.linux-x64-gnu.node
+            upload-loaders: true   # index.js + index.d.ts only needed from one job
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -50,11 +51,23 @@ jobs:
       - name: Build native addon
         run: npx napi build --platform --release --target ${{ matrix.target }}
 
-      - name: Upload artifact
+      - name: Upload .node artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: crates/side-huddle-node/${{ matrix.artifact }}
+          if-no-files-found: error
+
+      # Upload the generated index.js + index.d.ts from one job (Linux, fastest).
+      # These are platform-independent so any single job is sufficient.
+      - name: Upload JS loaders
+        if: matrix.upload-loaders
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-loaders
+          path: |
+            crates/side-huddle-node/index.js
+            crates/side-huddle-node/index.d.ts
           if-no-files-found: error
 
   # ── Build Python wheels on each platform ──────────────────────────────────
@@ -63,7 +76,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest       # arm64
+          - os: macos-latest
             target: aarch64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
@@ -99,10 +112,7 @@ jobs:
     needs: [build, build-python]
     if: startsWith(github.ref, 'refs/tags/v')
 
-    # id-token:write — required for:
-    #   npm OIDC trusted publishing
-    #   crates.io OIDC trusted publishing
-    #   PyPI OIDC trusted publishing
+    # id-token:write — required for npm / crates.io / PyPI OIDC trusted publishing
     permissions:
       contents: read
       id-token: write
@@ -113,30 +123,30 @@ jobs:
       # ── npm ──────────────────────────────────────────────────────────────
       - uses: actions/setup-node@v4
         with:
-          node-version: 24           # npm trusted publishing requires Node 24+
+          node-version: 24       # npm trusted publishing requires Node 24+
           registry-url: https://registry.npmjs.org/
-
-      - uses: dtolnay/rust-toolchain@stable
 
       - name: Install dependencies
         run: npm install
 
-      - name: Download all platform artifacts
+      - name: Download .node artifacts
         uses: actions/download-artifact@v4
         with:
           path: crates/side-huddle-node/artifacts
           pattern: "side-huddle-node.*"
 
-      - name: Move artifacts into place
+      - name: Download JS loaders (index.js + index.d.ts)
+        uses: actions/download-artifact@v4
+        with:
+          name: node-loaders
+          path: crates/side-huddle-node/
+
+      - name: Move .node artifacts into npm/* platform dirs
         shell: bash
         run: |
           npx napi artifacts \
             --dir artifacts \
             --dist npm
-        working-directory: crates/side-huddle-node
-
-      - name: Generate index.js + index.d.ts
-        run: npx napi prepublish -t npm --skip-gh-release
         working-directory: crates/side-huddle-node
 
       - name: Publish platform packages
