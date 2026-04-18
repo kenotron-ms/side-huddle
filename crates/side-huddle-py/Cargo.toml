@@ -1,0 +1,14 @@
+[package]
+    name        = "side-huddle-py"
+    version     = "0.1.0"
+    edition     = "2021"
+    publish     = false   # distributed via PyPI (maturin), not crates.io
+
+    [lib]
+    name       = "sidehuddle"
+    crate-type = ["cdylib"]
+
+    [dependencies]
+    pyo3        = { version = "0.25", features = ["extension-module"] }
+    side-huddle = { path = "../side-huddle" }
+    

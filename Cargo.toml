@@ -3,6 +3,7 @@
     members  = [
         "crates/side-huddle",
         "crates/side-huddle-node",
+        "crates/side-huddle-py",
     ]
 
     [workspace.package]
