@@ -14,8 +14,8 @@ package sidehuddle
 
     /*
     #cgo CFLAGS: -I${SRCDIR}/../../include
-    #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libside_huddle.a -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
-    #cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
+    #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libside_huddle.a -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
+    #cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
     #cgo linux   LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release
     #cgo windows LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle
 
