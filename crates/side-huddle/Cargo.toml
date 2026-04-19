@@ -18,9 +18,10 @@ targets        = ["x86_64-unknown-linux-gnu"]
 default-target = "x86_64-unknown-linux-gnu"
 
 [lib]
-# rlib   — Rust dependents
-# cdylib — C / Go / Python FFI consumers
-crate-type = ["rlib", "cdylib"]
+# rlib     — Rust dependents
+# cdylib   — C / Go / Python FFI consumers (dynamic)
+# staticlib — CGO static linking (go-gettable without rpath)
+crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 crossbeam-channel = { workspace = true }

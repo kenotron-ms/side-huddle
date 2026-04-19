@@ -1,0 +1,5 @@
+# Track pre-built archives (needed for go get). Keep *.a files.
+# Only ignore other build artifacts:
+*.dylib
+*.so
+*.dll
