@@ -1,19 +1,21 @@
 // Package sidehuddle provides Go bindings for the side-huddle Rust library.
-    //
-    // The bindings use CGo to call the compiled Rust cdylib.  Build the Rust
-    // library first:
-    //
-    //	cd crates/side-huddle && cargo build --release
-    //
-    // Then build/run via the repo Makefile:
-    //
-    //	make run-demo
-    package sidehuddle
+//
+// On darwin/arm64 a pre-built static archive is embedded under
+// bindings/go/lib/ — no Rust toolchain required.
+//
+// On linux, windows, and darwin/amd64 the cdylib must be built first:
+//
+//	cd crates/side-huddle && cargo build --release
+//
+// Then build/run via the repo Makefile:
+//
+//	make run-demo
+package sidehuddle
 
     /*
     #cgo CFLAGS: -I${SRCDIR}/../../include
     #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libside_huddle.a -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
-    #cgo darwin,amd64 LDFLAGS: ${SRCDIR}/lib/darwin_amd64/libside_huddle.a -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
+    #cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
     #cgo linux   LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release
     #cgo windows LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle
 
