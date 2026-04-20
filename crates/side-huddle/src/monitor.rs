@@ -21,7 +21,9 @@
         start_timer_cancel: Option<std::sync::mpsc::SyncSender<()>>,
         end_timer_cancel:   Option<std::sync::mpsc::SyncSender<()>>,
         #[cfg(target_os = "macos")]
-        win_watcher: Option<platform::darwin::window_watcher::WindowWatcher>,
+        win_watcher:     Option<platform::darwin::window_watcher::WindowWatcher>,
+        #[cfg(target_os = "macos")]
+        speaker_watcher: Option<platform::darwin::speaker::SpeakerWatcher>,
     }
 
     impl Monitor {
@@ -36,6 +38,8 @@
                     end_timer_cancel:   None,
                     #[cfg(target_os = "macos")]
                     win_watcher:        None,
+                    #[cfg(target_os = "macos")]
+                    speaker_watcher:    None,
                 })),
             }
         }
@@ -75,7 +79,7 @@
             g.start_timer_cancel = None;
             g.end_timer_cancel   = None;
             #[cfg(target_os = "macos")]
-            { g.win_watcher = None; }
+            { g.win_watcher = None; g.speaker_watcher = None; }
         }
     }
 
@@ -91,7 +95,7 @@
                 let app2   = app.clone();
                 thread::spawn(move || {
                     if rx.recv_timeout(SUSTAIN_DURATION).is_err() {
-                        fire_started(inner2, app2);
+                        fire_started(inner2, app2, pid);
                     }
                 });
             }
@@ -111,7 +115,7 @@
         }
     }
 
-    fn fire_started(inner: Arc<Mutex<Inner>>, app: String) {
+    fn fire_started(inner: Arc<Mutex<Inner>>, app: String, pid: u32) {
         let mut g = inner.lock().unwrap();
         g.start_timer_cancel = None;
         if g.in_meeting { return; }
@@ -122,24 +126,44 @@
         {
             use platform::darwin::window::cg_window_owner;
             use platform::darwin::window_watcher::WindowWatcher;
+            use platform::darwin::speaker::SpeakerWatcher;
 
             let owner  = cg_window_owner(&app);
             let inner2 = Arc::clone(&inner);
             let inner3 = Arc::clone(&inner);
+            let inner4 = Arc::clone(&inner);
             let app3   = app.clone();
+            let app4   = app.clone();
 
             g.win_watcher = Some(WindowWatcher::start(
                 owner,
-                // on_closed → fire MeetingEnded immediately
                 move || fire_ended(Arc::clone(&inner2)),
-                // on_identified → fire MeetingUpdated with window title
                 move |title| fire_updated(Arc::clone(&inner3), app3.clone(), title),
+            ));
+
+            g.speaker_watcher = Some(SpeakerWatcher::start(
+                app4.clone(),
+                pid,
+                move |speakers| {
+                    let g2 = inner4.lock().unwrap();
+                    if !g2.in_meeting { return; }
+                    let handlers = g2.handlers.clone();
+                    drop(g2);
+                    let det = Detection {
+                        kind:     DetectionKind::SpeakerChanged,
+                        app:      app4.clone(),
+                        title:    None,
+                        pid:      0,
+                        speakers,
+                    };
+                    for h in &handlers { h(det.clone()); }
+                },
             ));
         }
 
         let handlers = g.handlers.clone();
         drop(g);
-        let det = Detection { kind: DetectionKind::Started, app, title: None };
+        let det = Detection { kind: DetectionKind::Started, app, title: None, pid, speakers: vec![] };
         for h in &handlers { h(det.clone()); }
     }
 
@@ -148,7 +172,7 @@
         if !g.in_meeting { return; }
         let handlers = g.handlers.clone();
         drop(g);
-        let det = Detection { kind: DetectionKind::Updated, app, title: Some(title) };
+        let det = Detection { kind: DetectionKind::Updated, app, title: Some(title), pid: 0, speakers: vec![] };
         for h in &handlers { h(det.clone()); }
     }
 
@@ -159,10 +183,10 @@
         let app = std::mem::take(&mut g.current_app);
         g.in_meeting = false;
         #[cfg(target_os = "macos")]
-        { g.win_watcher = None; }
+        { g.win_watcher = None; g.speaker_watcher = None; }
 
         let handlers = g.handlers.clone();
         drop(g);
-        let det = Detection { kind: DetectionKind::Ended, app, title: None };
+        let det = Detection { kind: DetectionKind::Ended, app, title: None, pid: 0, speakers: vec![] };
         for h in &handlers { h(det.clone()); }
     }

@@ -14,7 +14,7 @@ package sidehuddle
 
     /*
     #cgo CFLAGS: -I${SRCDIR}/../../include
-    #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libside_huddle.a -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
+    #cgo darwin,arm64 LDFLAGS: ${SRCDIR}/lib/darwin_arm64/libside_huddle.a -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation -framework ApplicationServices
     #cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release -framework AudioToolbox -framework CoreAudio -framework CoreGraphics -framework CoreFoundation -framework AVFoundation
     #cgo linux   LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle -Wl,-rpath,${SRCDIR}/../../target/release
     #cgo windows LDFLAGS: -L${SRCDIR}/../../target/release -lside_huddle
@@ -43,6 +43,7 @@ package sidehuddle
 
     import (
     	"fmt"
+    	"strings"
     	"sync"
     	"sync/atomic"
     	"unsafe"
@@ -64,6 +65,7 @@ package sidehuddle
     	RecordingReady     EventKind = 7
     	CaptureStatus      EventKind = 8
     	Error              EventKind = 9
+    	SpeakerChanged     EventKind = 10
     )
 
     // Permission identifies a system permission.
@@ -97,10 +99,13 @@ package sidehuddle
     type Event struct {
     	Kind EventKind
 
-    	App     string // MeetingDetected/Updated/Ended, Recording*
-    	Title   string // MeetingUpdated
-    	Path    string // RecordingReady — path to the WAV file
-    	Message string // Error
+    	App        string   // MeetingDetected/Updated/Ended, Recording*, SpeakerChanged
+    	Title      string   // MeetingUpdated
+    	Path       string   // RecordingReady — mixed WAV path
+    	OthersPath string   // RecordingReady — tap-only WAV (other participants)
+    	SelfPath   string   // RecordingReady — mic-only WAV (local user)
+    	Message    string   // Error
+    	Speakers   []string // SpeakerChanged — names of currently speaking participants (empty = silence)
 
     	Permission  Permission
     	PermStatus  PermStatus
@@ -137,10 +142,20 @@ package sidehuddle
     // cEventToGo converts a C SHEvent to a Go Event.
     func cEventToGo(ev *C.SHEvent) *Event {
     	e := &Event{Kind: EventKind(ev.kind)}
-    	if ev.app     != nil { e.App     = C.GoString(ev.app) }
-    	if ev.title   != nil { e.Title   = C.GoString(ev.title) }
-    	if ev.path    != nil { e.Path    = C.GoString(ev.path) }
-    	if ev.message != nil { e.Message = C.GoString(ev.message) }
+    	if ev.app         != nil { e.App        = C.GoString(ev.app) }
+    	if ev.title       != nil { e.Title      = C.GoString(ev.title) }
+    	if ev.path        != nil { e.Path       = C.GoString(ev.path) }
+    	if ev.others_path != nil { e.OthersPath = C.GoString(ev.others_path) }
+    	if ev.self_path   != nil { e.SelfPath   = C.GoString(ev.self_path) }
+    	if ev.message     != nil { e.Message    = C.GoString(ev.message) }
+    	if ev.participant != nil {
+    		raw := C.GoString(ev.participant)
+    		if raw != "" {
+    			e.Speakers = strings.Split(raw, "\t")
+    		} else {
+    			e.Speakers = nil
+    		}
+    	}
     	e.Permission  = Permission(ev.permission)
     	e.PermStatus  = PermStatus(ev.perm_status)
     	e.CaptureKind = CaptureKind(ev.capture_kind)
@@ -174,7 +189,7 @@ package sidehuddle
     		"PermissionStatus", "PermissionsGranted",
     		"MeetingDetected", "MeetingUpdated", "MeetingEnded",
     		"RecordingStarted", "RecordingEnded", "RecordingReady",
-    		"CaptureStatus", "Error",
+    		"CaptureStatus", "Error", "SpeakerChanged",
     	}
     	if int(k) >= 0 && int(k) < len(names) {
     		return names[k]

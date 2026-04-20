@@ -18,7 +18,7 @@
 
         use crate::{CaptureKind, Event, MeetingListener, Permission, PermissionGranted};
 
-        // ── Opaque handle helpers ─────────────────────────────────────────────────
+        // ── Opaque handle helpers ─────────────────────────────────────────────────────
 
         /// Cast a raw handle back to a `&MeetingListener`. Panics on null.
         #[inline]
@@ -27,7 +27,7 @@
             &*(h as *const MeetingListener)
         }
 
-        // ── C-compatible event kind enum ──────────────────────────────────────────
+        // ── C-compatible event kind enum ──────────────────────────────────────────────
 
         #[repr(C)]
         #[derive(Debug, Clone, Copy)]
@@ -42,6 +42,7 @@
             RecordingReady     = 7,
             CaptureStatus      = 8,
             Error              = 9,
+            SpeakerChanged     = 10,
         }
 
         #[repr(C)]
@@ -67,7 +68,7 @@
             Video = 1,
         }
 
-        // ── Flat C event struct ───────────────────────────────────────────────────
+        // ── Flat C event struct ───────────────────────────────────────────────────────
         //
         // A flat struct is simpler for FFI than a tagged union.
         // Fields not relevant to a given `kind` are NULL / 0.
@@ -77,10 +78,13 @@
             pub kind: SHEventKind,
 
             // String fields — valid only during the callback
-            pub app:     *const c_char,   // meeting app name
-            pub title:   *const c_char,   // window title (MeetingUpdated)
-            pub path:    *const c_char,   // WAV path (RecordingReady)
-            pub message: *const c_char,   // error message (Error)
+            pub app:         *const c_char,   // meeting app name
+            pub title:       *const c_char,   // window title (MeetingUpdated)
+            pub path:        *const c_char,   // mixed WAV path (RecordingReady)
+            pub others_path: *const c_char,   // tap-only WAV path (RecordingReady)
+            pub self_path:   *const c_char,   // mic-only WAV path (RecordingReady)
+            pub message:     *const c_char,   // error message (Error)
+            pub participant: *const c_char,   // tab-separated speaker names (SpeakerChanged); "" = silence
 
             // PermissionStatus fields
             pub permission:   SHPermission,
@@ -96,7 +100,7 @@
         pub type SHEventCallback =
             unsafe extern "C" fn(event: *const SHEvent, userdata: *mut c_void);
 
-        // ── Rust Event → SHEvent conversion ──────────────────────────────────────
+        // ── Rust Event → SHEvent conversion ──────────────────────────────────────────
 
         // Store userdata as usize so the closure is Send + Sync.
         // Cast back to *mut c_void only at the C call boundary.
@@ -113,13 +117,16 @@
 
         fn dispatch(cb: SHEventCallback, ud: usize, event: &Event) {
             // CStrings live on the stack for the duration of the callback.
-            let (mut s1, mut s2, mut s3, s4): (Option<CString>, Option<CString>, Option<CString>, Option<CString>) = Default::default();
+            let (mut s1, mut s2, mut s3, mut s4, mut s5, mut s6):
+                (Option<CString>, Option<CString>, Option<CString>,
+                 Option<CString>, Option<CString>, Option<CString>) = Default::default();
             let null: *const c_char = std::ptr::null();
 
             let ev = match event {
                 Event::PermissionStatus { permission, status } => SHEvent {
                     kind:        SHEventKind::PermissionStatus,
-                    app: null, title: null, path: null, message: null,
+                    app: null, title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission:  match permission {
                         Permission::Microphone    => SHPermission::Microphone,
                         Permission::ScreenCapture => SHPermission::ScreenCapture,
@@ -135,52 +142,60 @@
                 },
                 Event::PermissionsGranted => SHEvent {
                     kind: SHEventKind::PermissionsGranted,
-                    app: null, title: null, path: null, message: null,
+                    app: null, title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
-                Event::MeetingDetected { app } => SHEvent {
+                Event::MeetingDetected { app, .. } => SHEvent {
                     kind: SHEventKind::MeetingDetected,
-                    app: str_ptr(app, &mut s1), title: null, path: null, message: null,
+                    app: str_ptr(app, &mut s1), title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
                 Event::MeetingUpdated { app, title } => SHEvent {
                     kind: SHEventKind::MeetingUpdated,
                     app: str_ptr(app, &mut s1), title: str_ptr(title, &mut s2),
-                    path: null, message: null,
+                    path: null, others_path: null, self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
                 Event::MeetingEnded { app } => SHEvent {
                     kind: SHEventKind::MeetingEnded,
-                    app: str_ptr(app, &mut s1), title: null, path: null, message: null,
+                    app: str_ptr(app, &mut s1), title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
                 Event::RecordingStarted { app } => SHEvent {
                     kind: SHEventKind::RecordingStarted,
-                    app: str_ptr(app, &mut s1), title: null, path: null, message: null,
+                    app: str_ptr(app, &mut s1), title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
                 Event::RecordingEnded { app } => SHEvent {
                     kind: SHEventKind::RecordingEnded,
-                    app: str_ptr(app, &mut s1), title: null, path: null, message: null,
+                    app: str_ptr(app, &mut s1), title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
-                Event::RecordingReady { path, app } => SHEvent {
+                Event::RecordingReady { mixed_path, others_path, self_path, app } => SHEvent {
                     kind: SHEventKind::RecordingReady,
-                    app:  str_ptr(app, &mut s1),
-                    path: str_ptr(path.to_str().unwrap_or(""), &mut s2),
-                    title: null, message: null,
+                    app:         str_ptr(app, &mut s1),
+                    path:        str_ptr(mixed_path.to_str().unwrap_or(""),  &mut s2),
+                    others_path: str_ptr(others_path.to_str().unwrap_or(""), &mut s3),
+                    self_path:   str_ptr(self_path.to_str().unwrap_or(""),   &mut s4),
+                    title: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
                 Event::CaptureStatus { kind, capturing } => SHEvent {
                     kind: SHEventKind::CaptureStatus,
-                    app: null, title: null, path: null, message: null,
+                    app: null, title: null, path: null, others_path: null,
+                    self_path: null, message: null, participant: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: match kind {
                         CaptureKind::Audio => SHCaptureKind::Audio,
@@ -190,20 +205,30 @@
                 },
                 Event::Error { message } => SHEvent {
                     kind: SHEventKind::Error,
-                    message: str_ptr(message, &mut s3),
-                    app: null, title: null, path: null,
+                    message: str_ptr(message, &mut s5),
+                    app: null, title: null, path: null, others_path: null,
+                    self_path: null, participant: null,
+                    permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
+                    capture_kind: SHCaptureKind::Audio, capturing: 0,
+                },
+                Event::SpeakerChanged { speakers, app } => SHEvent {
+                    kind: SHEventKind::SpeakerChanged,
+                    app:         str_ptr(app, &mut s1),
+                    participant: str_ptr(&speakers.join("\t"), &mut s6),
+                    title: null, path: null, others_path: null,
+                    self_path: null, message: null,
                     permission: SHPermission::Microphone, perm_status: SHPermissionStatus::Granted,
                     capture_kind: SHCaptureKind::Audio, capturing: 0,
                 },
             };
 
-            // s1..s4 are still alive here and will be dropped at end of scope,
+            // s1..s6 are still alive here and will be dropped at end of scope,
             // which is AFTER the callback returns — pointers in ev remain valid.
             unsafe { cb(&ev, ud as *mut c_void) };
-            drop((s1, s2, s3, s4)); // explicit drop for clarity; already the natural order
+            drop((s1, s2, s3, s4, s5, s6));
         }
 
-        // ── Public C API ──────────────────────────────────────────────────────────
+        // ── Public C API ──────────────────────────────────────────────────────────────
 
         /// Create a new listener.  Free with `side_huddle_free`.
         #[no_mangle]
@@ -314,4 +339,3 @@
             static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
             VERSION.as_ptr() as *const c_char
         }
-    

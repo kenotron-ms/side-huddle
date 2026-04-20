@@ -58,6 +58,14 @@ sysinfo = "0.33"
 name = "demo"
 path = "examples/demo.rs"
 
+[[example]]
+name = "speaker_probe"
+path = "examples/speaker_probe.rs"
+
+[[example]]
+name = "meeting_recorder"
+path = "examples/meeting_recorder.rs"
+
 [dev-dependencies]
 env_logger            = "0.11"
 ctrlc                 = "3"

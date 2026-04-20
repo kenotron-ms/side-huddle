@@ -6,7 +6,7 @@
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
 
-    use crate::mix::mix_recordings;
+    use crate::mix::mix_pcm;
     use crate::monitor::Monitor;
     use crate::platform;
     use crate::{Detection, DetectionKind, Event, Permission, PermissionGranted, Recording, Result};
@@ -46,10 +46,24 @@
         }
     }
 
+    /// Holds the stop functions for an active recording.
+    /// Dropping this calls both tap and mic stop functions.
+    struct RecordingHandle {
+        _tap_stop: Option<Box<dyn FnOnce() + Send>>,
+        _mic_stop: Option<Box<dyn FnOnce() + Send>>,
+    }
+
+    impl Drop for RecordingHandle {
+        fn drop(&mut self) {
+            if let Some(f) = self._tap_stop.take() { f(); }
+            if let Some(f) = self._mic_stop.take() { f(); }
+        }
+    }
+
     struct MeetingState {
         in_meeting: bool,
         app:        String,
-        recording:  Option<Recording>,
+        recording:  Option<RecordingHandle>,
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -114,6 +128,39 @@
         /// No-op if no meeting is active or a recording is already running.
         /// Emits [`Event::RecordingStarted`] on success, [`Event::Error`] on failure.
         pub fn record(&self) {
+            // macOS: check/request microphone permission before anything else,
+            // outside all locks so we can safely block for the dialog.
+            #[cfg(target_os = "macos")]
+            {
+                match check_microphone() {
+                    PermissionGranted::Granted => {}
+                    PermissionGranted::NotRequested => {
+                        // Never been asked — show the system dialog now.
+                        let status = request_microphone_access();
+                        emit(&self.inner, &Event::PermissionStatus {
+                            permission: Permission::Microphone,
+                            status,
+                        });
+                        if status != PermissionGranted::Granted {
+                            emit(&self.inner, &Event::Error {
+                                message: "Microphone access denied — grant permission in System Settings > Privacy > Microphone".into(),
+                            });
+                            return;
+                        }
+                    }
+                    PermissionGranted::Denied => {
+                        emit(&self.inner, &Event::PermissionStatus {
+                            permission: Permission::Microphone,
+                            status: PermissionGranted::Denied,
+                        });
+                        emit(&self.inner, &Event::Error {
+                            message: "Microphone access denied — grant permission in System Settings > Privacy > Microphone".into(),
+                        });
+                        return;
+                    }
+                }
+            }
+
             let (sample_rate, chunk_ms, output_dir) = {
                 let cfg = self.inner.config.lock().unwrap();
                 (cfg.sample_rate, cfg.chunk_ms, cfg.output_dir.clone())
@@ -126,43 +173,75 @@
 
             let tap = match platform::start_tap(sample_rate, chunk_ms) {
                 Ok(r)  => r,
-                Err(e) => {
-                    drop(state);
-                    emit(&self.inner, &Event::Error { message: e.to_string() });
-                    return;
-                }
+                Err(e) => { drop(state); emit(&self.inner, &Event::Error { message: e.to_string() }); return; }
             };
             let mic = match platform::start_mic(sample_rate, chunk_ms) {
                 Ok(r)  => r,
-                Err(e) => {
-                    drop(state);
-                    emit(&self.inner, &Event::Error { message: e.to_string() });
-                    return;
-                }
+                Err(e) => { drop(state); emit(&self.inner, &Event::Error { message: e.to_string() }); return; }
             };
 
-            let mixed = mix_recordings(tap, mic, sample_rate);
-            let rx    = mixed.rx.clone();
-            let path  = output_dir.join(format!("{}-meeting.wav", unix_secs()));
-            state.recording = Some(mixed);
+            // Extract stop functions and receivers before consuming the Recording objects
+            let mut tap = tap; let mut mic = mic;
+            let tap_stop = tap.stop_fn.take();
+            let mic_stop = mic.stop_fn.take();
+            let tap_rx   = tap.rx.clone();
+            let mic_rx   = mic.rx.clone();
+            drop(tap); drop(mic);
+
+            let stem         = output_dir.join(format!("{}-meeting", unix_secs()));
+            let mixed_path   = stem.with_extension("wav");
+            let others_path  = PathBuf::from(format!("{}-others.wav",  stem.display()));
+            let self_path    = PathBuf::from(format!("{}-self.wav",    stem.display()));
+
+            // Store stop handles so stop_recording() can halt both streams
+            state.recording = Some(RecordingHandle {
+                _tap_stop: tap_stop,
+                _mic_stop: mic_stop,
+            });
             drop(state);
 
             emit(&self.inner, &Event::RecordingStarted { app: app.clone() });
 
             let inner = Arc::clone(&self.inner);
             thread::spawn(move || {
-                let mut pcm: Vec<i16> = Vec::new();
-                for chunk in rx.iter() { pcm.extend_from_slice(&chunk.pcm); }
-                if pcm.is_empty() { return; }
+                // Drain tap and mic concurrently into separate PCM buffers
+                use std::sync::mpsc::sync_channel;
+                let (tap_tx, tap_done) = sync_channel::<Vec<i16>>(0);
+                let (mic_tx, mic_done) = sync_channel::<Vec<i16>>(0);
+
+                thread::spawn(move || {
+                    let mut pcm = Vec::new();
+                    for chunk in tap_rx { pcm.extend_from_slice(&chunk.pcm); }
+                    let _ = tap_tx.send(pcm);
+                });
+                thread::spawn(move || {
+                    let mut pcm = Vec::new();
+                    for chunk in mic_rx { pcm.extend_from_slice(&chunk.pcm); }
+                    let _ = mic_tx.send(pcm);
+                });
+
+                let others_pcm = tap_done.recv().unwrap_or_default();
+                let self_pcm   = mic_done.recv().unwrap_or_default();
+
+                if others_pcm.is_empty() && self_pcm.is_empty() { return; }
+
+                let mixed_pcm = mix_pcm(&others_pcm, &self_pcm);
 
                 emit(&inner, &Event::RecordingEnded { app: app.clone() });
 
-                if write_wav(&path, &pcm, sample_rate).is_ok() {
-                    emit(&inner, &Event::RecordingReady { path, app });
-                } else {
-                    emit(&inner, &Event::Error {
-                        message: format!("failed to write WAV"),
+                let ok = write_wav(&others_path, &others_pcm, sample_rate).is_ok()
+                    &    write_wav(&self_path,   &self_pcm,   sample_rate).is_ok()
+                    &    write_wav(&mixed_path,  &mixed_pcm,  sample_rate).is_ok();
+
+                if ok {
+                    emit(&inner, &Event::RecordingReady {
+                        mixed_path,
+                        others_path,
+                        self_path,
+                        app,
                     });
+                } else {
+                    emit(&inner, &Event::Error { message: "failed to write WAV files".into() });
                 }
             });
         }
@@ -203,15 +282,15 @@
     fn check_and_emit_permissions(inner: &Arc<Inner>) {
         #[cfg(target_os = "macos")]
         {
-            let sc = check_screen_capture();
+            let sc  = check_screen_capture();
+            let mic = check_microphone();
             emit(inner, &Event::PermissionStatus {
                 permission: Permission::ScreenCapture,
                 status:     sc,
             });
-            // Microphone: we report NotRequested until the first record() attempt
             emit(inner, &Event::PermissionStatus {
                 permission: Permission::Microphone,
-                status:     PermissionGranted::NotRequested,
+                status:     mic,
             });
             if sc == PermissionGranted::Granted {
                 emit(inner, &Event::PermissionsGranted);
@@ -226,8 +305,6 @@
 
     #[cfg(target_os = "macos")]
     fn check_screen_capture() -> PermissionGranted {
-        // CGPreflightScreenCaptureAccess() returns true if the process has the
-        // Screen Recording permission in System Settings.
         extern "C" { fn CGPreflightScreenCaptureAccess() -> bool; }
         if unsafe { CGPreflightScreenCaptureAccess() } {
             PermissionGranted::Granted
@@ -235,6 +312,173 @@
             PermissionGranted::NotRequested
         }
     }
+
+    /// Check microphone permission via the ObjC runtime without requiring
+    /// AVFoundation to be an explicit Rust dependency.
+    /// Calls [AVCaptureDevice authorizationStatusForMediaType: @"soun"].
+    /// Returns: NotRequested=not yet asked, Denied=blocked, Granted=approved.
+    #[cfg(target_os = "macos")]
+    fn check_microphone() -> PermissionGranted {
+        use std::ffi::c_void;
+        type ID  = *mut c_void;
+        type SEL = *const c_void;
+
+        extern "C" {
+            fn objc_getClass(name: *const u8)    -> *const c_void;
+            fn sel_registerName(name: *const u8) -> SEL;
+        }
+
+        let msg_send_ptr = unsafe {
+            libc::dlsym(libc::RTLD_DEFAULT, b"objc_msgSend\0".as_ptr() as _)
+        };
+        if msg_send_ptr.is_null() { return PermissionGranted::NotRequested; }
+
+        // Ensure AVFoundation is loaded — on macOS 14+ classes register lazily
+        // even when the binary links the framework.
+        unsafe {
+            libc::dlopen(
+                b"/System/Library/Frameworks/AVFoundation.framework/AVFoundation\0".as_ptr() as *const libc::c_char,
+                libc::RTLD_LAZY | libc::RTLD_GLOBAL,
+            );
+        }
+
+        unsafe {
+            let ns_string_cls = objc_getClass(b"NSString\0".as_ptr());
+            let av_device_cls = objc_getClass(b"AVCaptureDevice\0".as_ptr());
+            if ns_string_cls.is_null() || av_device_cls.is_null() {
+                return PermissionGranted::NotRequested;
+            }
+
+            // [NSString stringWithUTF8String:"soun"]  (AVMediaTypeAudio constant)
+            let sel_utf8 = sel_registerName(b"stringWithUTF8String:\0".as_ptr());
+            type FnStr = unsafe extern "C" fn(*const c_void, SEL, *const u8) -> ID;
+            let fn_str: FnStr = std::mem::transmute(msg_send_ptr);
+            let media_type = fn_str(ns_string_cls, sel_utf8, b"soun\0".as_ptr());
+            if media_type.is_null() { return PermissionGranted::NotRequested; }
+
+            // [AVCaptureDevice authorizationStatusForMediaType: mediaType]
+            // NSInteger: 0=NotDetermined, 1=Restricted, 2=Denied, 3=Authorized
+            let sel_auth = sel_registerName(b"authorizationStatusForMediaType:\0".as_ptr());
+            type FnAuth = unsafe extern "C" fn(*const c_void, SEL, ID) -> isize;
+            let fn_auth: FnAuth = std::mem::transmute(msg_send_ptr);
+            match fn_auth(av_device_cls, sel_auth, media_type) {
+                3 => PermissionGranted::Granted,
+                1 | 2 => PermissionGranted::Denied,
+                _ => PermissionGranted::NotRequested,  // 0 = not yet determined
+            }
+        }
+    }
+
+    /// Synchronously request microphone access via
+    /// [AVCaptureDevice requestAccessForMediaType:completionHandler:].
+    /// Blocks the calling thread until the user responds to the system dialog.
+    /// Safe to call even if permission was already granted (returns immediately).
+    #[cfg(target_os = "macos")]
+    fn request_microphone_access() -> PermissionGranted {
+        use std::ffi::c_void;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        type ID  = *mut c_void;
+        type SEL = *const c_void;
+
+        extern "C" {
+            fn objc_getClass(name: *const u8)              -> *const c_void;
+            fn sel_registerName(name: *const u8)           -> SEL;
+            fn dispatch_semaphore_create(value: isize)     -> *mut c_void;
+            fn dispatch_semaphore_signal(sema: *mut c_void) -> isize;
+            fn dispatch_semaphore_wait(sema: *mut c_void, timeout: u64) -> isize;
+            fn dispatch_release(obj: *mut c_void);
+        }
+
+        // Objective-C block ABI: void(^)(BOOL)
+        // Flags = 0 → no copy/dispose helpers → ObjC does a bitwise copy of the struct,
+        // which is exactly what we want (the pointers remain valid throughout the wait).
+        #[repr(C)]
+        struct BoolBlock {
+            isa:      *const c_void,
+            flags:    i32,
+            reserved: i32,
+            invoke:   unsafe extern "C" fn(*const BoolBlock, bool),
+            desc:     *const BlockDesc,
+            granted:  *const AtomicBool,   // captured: where to write the result
+            sema:     *mut c_void,         // captured: semaphore to signal
+        }
+
+        #[repr(C)]
+        struct BlockDesc { reserved: usize, size: usize }
+        static BLOCK_DESC: BlockDesc = BlockDesc {
+            reserved: 0,
+            size:     core::mem::size_of::<BoolBlock>(),
+        };
+
+        unsafe extern "C" fn block_invoke(block: *const BoolBlock, granted: bool) {
+            (*(*block).granted).store(granted, Ordering::SeqCst);
+            dispatch_semaphore_signal((*block).sema);
+        }
+
+        let msg_send_ptr = unsafe {
+            libc::dlsym(libc::RTLD_DEFAULT, b"objc_msgSend\0".as_ptr() as _)
+        };
+        let stack_block_isa = unsafe {
+            libc::dlsym(libc::RTLD_DEFAULT, b"_NSConcreteStackBlock\0".as_ptr() as _)
+        };
+        if msg_send_ptr.is_null() || stack_block_isa.is_null() {
+            return PermissionGranted::NotRequested;
+        }
+
+        // Force AVFoundation class registration before calling objc_getClass.
+        unsafe {
+            libc::dlopen(
+                b"/System/Library/Frameworks/AVFoundation.framework/AVFoundation\0".as_ptr() as *const libc::c_char,
+                libc::RTLD_LAZY | libc::RTLD_GLOBAL,
+            );
+        }
+
+        let granted = AtomicBool::new(false);
+
+        unsafe {
+            let sema = dispatch_semaphore_create(0);
+            if sema.is_null() { return PermissionGranted::NotRequested; }
+
+            let mut block = BoolBlock {
+                isa:      stack_block_isa,
+                flags:    0,
+                reserved: 0,
+                invoke:   block_invoke,
+                desc:     &BLOCK_DESC,
+                granted:  &granted,
+                sema,
+            };
+
+            let ns_string_cls = objc_getClass(b"NSString\0".as_ptr());
+            let av_device_cls = objc_getClass(b"AVCaptureDevice\0".as_ptr());
+            if ns_string_cls.is_null() || av_device_cls.is_null() {
+                dispatch_release(sema);
+                return PermissionGranted::NotRequested;
+            }
+
+            let sel_utf8 = sel_registerName(b"stringWithUTF8String:\0".as_ptr());
+            type FnStr = unsafe extern "C" fn(*const c_void, SEL, *const u8) -> ID;
+            let fn_str: FnStr = core::mem::transmute(msg_send_ptr);
+            let media_type = fn_str(ns_string_cls, sel_utf8, b"soun\0".as_ptr());
+
+            let sel_req = sel_registerName(b"requestAccessForMediaType:completionHandler:\0".as_ptr());
+            type FnReq = unsafe extern "C" fn(*const c_void, SEL, ID, *mut BoolBlock);
+            let fn_req: FnReq = core::mem::transmute(msg_send_ptr);
+            fn_req(av_device_cls, sel_req, media_type, &mut block);
+
+            // Wait for the user to respond (or already-granted to call the handler immediately)
+            dispatch_semaphore_wait(sema, u64::MAX);
+            dispatch_release(sema);
+        }
+
+        if granted.load(Ordering::SeqCst) {
+            PermissionGranted::Granted
+        } else {
+            PermissionGranted::Denied
+        }
+    }
+
 
     // ── Detection dispatch ────────────────────────────────────────────────────
 
@@ -246,7 +490,7 @@
                     m.in_meeting = true;
                     m.app        = det.app.clone();
                 }
-                emit(inner, &Event::MeetingDetected { app: det.app.clone() });
+                emit(inner, &Event::MeetingDetected { app: det.app.clone(), pid: det.pid });
 
                 if inner.auto_record.load(Ordering::Relaxed) {
                     MeetingListener { inner: Arc::clone(inner) }.record();
@@ -266,6 +510,10 @@
                 inner.meeting.lock().unwrap().recording = None;
                 emit(inner, &Event::MeetingEnded { app: det.app });
                 inner.meeting.lock().unwrap().in_meeting = false;
+            }
+
+            DetectionKind::SpeakerChanged => {
+                emit(inner, &Event::SpeakerChanged { speakers: det.speakers, app: det.app });
             }
         }
     }

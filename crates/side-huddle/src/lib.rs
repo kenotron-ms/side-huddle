@@ -26,12 +26,20 @@
 
     pub use recorder::MeetingListener;
 
-    /// Window utilities re-exported for use from examples and external consumers.
+    /// Window + meeting-detection utilities re-exported for examples and external consumers.
     #[cfg(target_os = "macos")]
     pub mod window {
         pub use crate::platform::darwin::window::{
             cg_window_owner, find_primary_window, window_bounds, window_exists,
         };
+
+        /// Returns `(pid, friendly_app_name)` of the first app that currently
+        /// has an active microphone session (CoreAudio `IsRunningInput`), or
+        /// `(0, "")` if no meeting is detected.  Same detector used internally
+        /// by `MeetingListener`.
+        pub fn poll_active() -> (u32, String) {
+            crate::platform::poll_active()
+        }
     }
 
     // ── Public event type ─────────────────────────────────────────────────────
@@ -70,7 +78,7 @@
         // ── Meeting lifecycle ─────────────────────────────────────────────────
         /// A Teams / Zoom / Google Meet session was detected (new start, or
         /// already in progress when the listener started).
-        MeetingDetected { app: String },
+        MeetingDetected { app: String, pid: u32 },
 
         /// Meeting metadata became known — currently the window title once the
         /// window watcher identifies the call window.
@@ -88,10 +96,22 @@
         /// [`Event::RecordingReady`] shortly after.
         RecordingEnded { app: String },
 
-        /// A completed WAV recording is available at `path`.
-        /// Only fired when [`MeetingListener::record`] (or
-        /// [`MeetingListener::auto_record`]) was active during the meeting.
-        RecordingReady { path: std::path::PathBuf, app: String },
+        /// A completed recording is ready.  Three WAV files are produced:
+            /// - `mixed_path`  — tap + mic combined (full meeting audio)
+            /// - `others_path` — system-tap only   (what other participants said)
+            /// - `self_path`   — microphone only    (what you said)
+            ///
+            /// Only fired when [`MeetingListener::record`] (or
+            /// [`MeetingListener::auto_record`]) was active during the meeting.
+            RecordingReady {
+                /// Tap + mic mixed — use for single-stream transcription
+                mixed_path:  std::path::PathBuf,
+                /// System tap only (other participants)
+                others_path: std::path::PathBuf,
+                /// Microphone only (local user)
+                self_path:   std::path::PathBuf,
+                app:         String,
+            },
 
         // ── Capture health ────────────────────────────────────────────────────
         /// The audio or video capture stream was interrupted or resumed.
@@ -102,6 +122,12 @@
         // ── Errors ────────────────────────────────────────────────────────────
         /// An error occurred (e.g. the audio tap failed to start).
         Error { message: String },
+
+        // ── Speaker diarization
+        /// The set of visually-detected speaking participants changed.
+        /// Empty \ means silence / no chromatic ring detected.
+        /// macOS only; never emitted on other platforms.
+        SpeakerChanged { speakers: Vec<String>, app: String },
     }
 
     // ── Supporting types ──────────────────────────────────────────────────────
@@ -140,7 +166,7 @@
     // ── Internal detection types (monitor ↔ recorder only) ───────────────────
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum DetectionKind { Started, Updated, Ended }
+    pub(crate) enum DetectionKind { Started, Updated, Ended, SpeakerChanged }
 
     #[derive(Debug, Clone)]
     pub(crate) struct Detection {
@@ -148,6 +174,10 @@
         pub(crate) app:   String,
         /// Window title — set when kind == Updated.
         pub(crate) title: Option<String>,
+        /// Process ID of the meeting app — set when kind == Started.
+        pub(crate) pid:      u32,
+        /// Speaker names — set when kind == SpeakerChanged.
+        pub(crate) speakers: Vec<String>,
     }
 
     // ── Internal audio types ──────────────────────────────────────────────────

@@ -104,6 +104,7 @@ fn event_to_js(env: &Env, event: &Event) -> napi::Result<JsObject> {
         Event::RecordingReady { .. }    => "RecordingReady",
         Event::CaptureStatus { .. }     => "CaptureStatus",
         Event::Error { .. }             => "Error",
+        Event::SpeakerChanged { .. }    => "SpeakerChanged",
     };
     obj.set_named_property("kind", env.create_string(kind)?)?;
 
@@ -120,8 +121,11 @@ fn event_to_js(env: &Env, event: &Event) -> napi::Result<JsObject> {
                 PermissionGranted::Denied       => "Denied",
             })?)?;
         }
-        Event::MeetingDetected { app }
-        | Event::MeetingEnded { app }
+        Event::MeetingDetected { app, pid } => {
+            obj.set_named_property("app", env.create_string(app)?)?;
+            obj.set_named_property("pid", env.create_uint32(*pid)?)?;
+        }
+        Event::MeetingEnded { app }
         | Event::RecordingStarted { app }
         | Event::RecordingEnded { app } => {
             obj.set_named_property("app", env.create_string(app)?)?;
@@ -130,11 +134,19 @@ fn event_to_js(env: &Env, event: &Event) -> napi::Result<JsObject> {
             obj.set_named_property("app", env.create_string(app)?)?;
             obj.set_named_property("title", env.create_string(title)?)?;
         }
-        Event::RecordingReady { path, app } => {
+        Event::RecordingReady { mixed_path, others_path, self_path, app } => {
             obj.set_named_property("app", env.create_string(app)?)?;
             obj.set_named_property(
-                "path",
-                env.create_string(path.to_str().unwrap_or(""))?,
+                "mixedPath",
+                env.create_string(mixed_path.to_str().unwrap_or(""))?,
+            )?;
+            obj.set_named_property(
+                "othersPath",
+                env.create_string(others_path.to_str().unwrap_or(""))?,
+            )?;
+            obj.set_named_property(
+                "selfPath",
+                env.create_string(self_path.to_str().unwrap_or(""))?,
             )?;
         }
         Event::CaptureStatus { kind, capturing } => {
@@ -146,6 +158,14 @@ fn event_to_js(env: &Env, event: &Event) -> napi::Result<JsObject> {
         }
         Event::Error { message } => {
             obj.set_named_property("message", env.create_string(message)?)?;
+        }
+        Event::SpeakerChanged { speakers, app } => {
+            obj.set_named_property("app", env.create_string(app)?)?;
+            let mut arr = env.create_array_with_length(speakers.len())?;
+            for (i, name) in speakers.iter().enumerate() {
+                arr.set_element(i as u32, env.create_string(name)?)?;
+            }
+            obj.set_named_property("speakers", arr)?;
         }
         Event::PermissionsGranted => {}
     }

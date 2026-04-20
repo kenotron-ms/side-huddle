@@ -23,11 +23,11 @@
     extern "C" {
     #endif
 
-    /* ── Opaque handle ─────────────────────────────────────────────────────────── */
+    /* ── Opaque handle ────────────────────────────────────────────────────────── */
 
     typedef void* SideHuddleHandle;
 
-    /* ── Enums ─────────────────────────────────────────────────────────────────── */
+    /* ── Enums ────────────────────────────────────────────────────────────────── */
 
     typedef enum SHEventKind {
         SH_PERMISSION_STATUS    = 0,
@@ -40,6 +40,7 @@
         SH_RECORDING_READY      = 7,
         SH_CAPTURE_STATUS       = 8,
         SH_ERROR                = 9,
+        SH_SPEAKER_CHANGED      = 10,
     } SHEventKind;
 
     typedef enum SHPermission {
@@ -59,7 +60,7 @@
         SH_CAPTURE_VIDEO = 1,
     } SHCaptureKind;
 
-    /* ── Event struct ──────────────────────────────────────────────────────────── */
+    /* ── Event struct ─────────────────────────────────────────────────────────── */
 
     /**
      * Flat event structure.  Check `kind` first, then read the relevant fields.
@@ -71,10 +72,13 @@
         SHEventKind  kind;
 
         /* String fields */
-        const char*  app;       /**< Meeting app: "Microsoft Teams", "Zoom", "Google Meet" */
-        const char*  title;     /**< Window title (SH_MEETING_UPDATED only)                */
-        const char*  path;      /**< WAV file path (SH_RECORDING_READY only)               */
-        const char*  message;   /**< Error description (SH_ERROR only)                     */
+        const char*  app;          /**< Meeting app name                                          */
+        const char*  title;        /**< Window title (SH_MEETING_UPDATED only)                    */
+        const char*  path;         /**< Mixed WAV file path (SH_RECORDING_READY)                  */
+        const char*  others_path;  /**< Tap-only WAV path — other participants (SH_RECORDING_READY) */
+        const char*  self_path;    /**< Mic-only WAV path — local user (SH_RECORDING_READY)       */
+        const char*  message;      /**< Error description (SH_ERROR only)                         */
+        const char*  participant;  /**< Tab-separated speaker names (SH_SPEAKER_CHANGED); "" = silence */
 
         /* SH_PERMISSION_STATUS fields */
         SHPermission       permission;
@@ -85,7 +89,7 @@
         int           capturing;   /**< 1 = capturing, 0 = interrupted */
     } SHEvent;
 
-    /* ── Callback ──────────────────────────────────────────────────────────────── */
+    /* ── Callback ─────────────────────────────────────────────────────────────── */
 
     /**
      * Event callback.  Called on a background thread.
@@ -94,7 +98,7 @@
      */
     typedef void (*SHEventCallback)(const SHEvent* event, void* userdata);
 
-    /* ── API ───────────────────────────────────────────────────────────────────── */
+    /* ── API ──────────────────────────────────────────────────────────────────── */
 
     /** Create a new listener.  Free with side_huddle_free(). */
     SideHuddleHandle side_huddle_new(void);
@@ -135,4 +139,3 @@
     #endif
 
     #endif /* SIDE_HUDDLE_H */
-    

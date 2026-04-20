@@ -4,4 +4,5 @@
     pub(crate) mod record_mic;
     pub(crate) mod window;
     pub(crate) mod window_watcher;
+    pub(crate) mod speaker;
     

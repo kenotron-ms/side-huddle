@@ -7,6 +7,8 @@
 use side_huddle::{Event, MeetingListener, PermissionGranted};
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("side-huddle — waiting for Teams / Zoom / Google Meet…\n");
@@ -14,7 +16,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = MeetingListener::new();
 
     // ── Handler 1: full lifecycle log ──────────────────────────────────────
-    listener.on(|event| match event {
+    let recording_active = Arc::new(AtomicBool::new(false));
+    let ra = recording_active.clone();
+    listener.on(move |event| match event {
         Event::PermissionStatus { permission, status } => {
             let icon = match status {
                 PermissionGranted::Granted      => "✅",
@@ -24,12 +28,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("{icon} permission: {permission:?} → {status:?}");
         }
         Event::PermissionsGranted               => println!("✅ all permissions granted"),
-        Event::MeetingDetected  { app }         => println!("🟢  detected:  {app}"),
+        Event::MeetingDetected  { app, .. }     => println!("🟢  detected:  {app}"),
         Event::MeetingUpdated   { app, title }  => println!("📋  updated:   {app} — \"{title}\""),
-        Event::RecordingStarted { app }         => println!("⏺   recording: {app} started"),
-        Event::MeetingEnded     { app }         => println!("🔴  ended:     {app}"),
-        Event::RecordingEnded   { app }         => println!("⏹   recording: {app} stopped"),
-        Event::RecordingReady   { path, app }   => println!("💾  saved:     {app} → {}", path.display()),
+        Event::RecordingStarted { app }         => {
+            ra.store(true, Ordering::Relaxed);
+            println!("⏺   recording: {app} started");
+        }
+        Event::MeetingEnded     { app }         => {
+            println!("🔴  ended:     {app}");
+            if !ra.load(Ordering::Relaxed) {
+                std::process::exit(0);
+            }
+        }
+        Event::RecordingEnded   { app }         => println!("⏹   recording: {app} stopped — saving…"),
+        Event::RecordingReady   { mixed_path, app, .. } => {
+            println!("💾  saved:     {app} → {}", mixed_path.display());
+            std::process::exit(0);
+        }
         Event::CaptureStatus    { kind, capturing } =>
             println!("📡  capture:   {kind:?} capturing={capturing}"),
         Event::Error            { message }     => eprintln!("⚠️   error:     {message}"),
@@ -38,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ── Handler 2: prompt user before recording ────────────────────────────
     let l = listener.clone();
     listener.on(move |event| {
-        if let Event::MeetingDetected { app } = event {
+        if let Event::MeetingDetected { app, .. } = event {
             print!("   Record {app}? [y/N] ");
             let _ = std::io::stdout().flush();
             let mut buf = String::new();
@@ -52,7 +67,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── Handler 3: transcribe when WAV is ready ────────────────────────────
     listener.on(|event| {
-        if let Event::RecordingReady { path, .. } = event {
+        if let Event::RecordingReady { mixed_path: path, .. } = event {
             if let Ok(api_key) = std::env::var("OPENAI_API_KEY") {
                 println!("📝  transcribing…");
                 match transcribe_wav(path, &api_key) {
