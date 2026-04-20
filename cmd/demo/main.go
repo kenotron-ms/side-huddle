@@ -3,18 +3,18 @@
 // Usage:
 //
 //	make run-demo
-//	OPENAI_API_KEY=sk-... make run-demo   # enables transcription after recording
+//
+// Local transcription via whisper.cpp (`brew install whisper-cpp` + download
+// a model) automatically engages after each recording if `whisper-cli` is on
+// PATH and a model is at ~/.local/share/whisper/models/ggml-small.en.bin
+// (override via WHISPER_MODEL env).
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"mime/multipart"
-	"net/http"
-	"net/textproto"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"regexp"
@@ -218,21 +218,24 @@ func fmtOffset(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", s/60, s%60)
 }
 
-// ── Transcription ─────────────────────────────────────────────────────────────
+// ── Transcription (local via whisper.cpp) ───────────────────────────────────
+//
+// Shells out to whisper-cli (`brew install whisper-cpp`) with a local GGML
+// model — no API key, no network, no cloud. Model is found at:
+//   $WHISPER_MODEL (if set), else ~/.local/share/whisper/models/ggml-small.en.bin
+//
+// Install model with:
+//   curl -L -o ~/.local/share/whisper/models/ggml-small.en.bin \
+//     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
 
 // WAV header = 44 bytes; 0.1s at 16 kHz mono = 3200 bytes of samples → min ~3244 bytes.
 const minWAVBytes = 3244
 
 type segment struct {
-	Start        float64
-	End          float64
-	Text         string
-	NoSpeechProb float64 // Whisper confidence that this is silence / not speech
+	Start float64
+	End   float64
+	Text  string
 }
-
-// Hallucination threshold: segments where Whisper is > 60% sure there's no speech
-// are almost always noise-induced gibberish (often Korean/Japanese/Chinese characters).
-const noSpeechThreshold = 0.6
 
 type transcriptResult struct {
 	label    string
@@ -242,9 +245,12 @@ type transcriptResult struct {
 }
 
 func offerTranscription(ev *sh.Event, timeline []speakerEntry, recStart time.Time) {
-	apiKey := os.Getenv("OPENAI_API_KEY")
-	if apiKey == "" {
-		fmt.Println("(set OPENAI_API_KEY to transcribe)")
+	if _, err := exec.LookPath("whisper-cli"); err != nil {
+		fmt.Println("(install whisper-cpp to enable local transcription: brew install whisper-cpp)")
+		return
+	}
+	if _, err := os.Stat(whisperModelPath()); err != nil {
+		fmt.Printf("(whisper model not found at %s — download a .bin from huggingface.co/ggerganov/whisper.cpp)\n", whisperModelPath())
 		return
 	}
 
@@ -269,7 +275,7 @@ func offerTranscription(ev *sh.Event, timeline []speakerEntry, recStart time.Tim
 				return
 			}
 			fmt.Printf("📝  transcribing %s…\n", r.label)
-			segs, err := transcribeWAV(r.path, apiKey)
+			segs, err := transcribeWAV(r.path)
 			ch <- transcriptResult{r.label, r.path, segs, err}
 		}()
 	}
@@ -357,81 +363,84 @@ func fmtSecs(s float64) string {
 	return fmt.Sprintf("%d:%02d", total/60, total%60)
 }
 
-func transcribeWAV(wavPath, apiKey string) ([]segment, error) {
-	wavBytes, err := os.ReadFile(wavPath)
-	if err != nil {
-		return nil, err
+// whisperModelPath resolves the GGML model file whisper-cli should load.
+// Override via WHISPER_MODEL=/path/to/other-model.bin.
+func whisperModelPath() string {
+	if p := os.Getenv("WHISPER_MODEL"); p != "" {
+		return p
 	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".local/share/whisper/models/ggml-small.en.bin")
+}
 
-	var body bytes.Buffer
-	w := multipart.NewWriter(&body)
-	_ = w.WriteField("model", "whisper-1")
-	_ = w.WriteField("response_format", "verbose_json")
-	_ = w.WriteField("timestamp_granularities[]", "segment")
-	// Explicit language prevents Whisper hallucinating random foreign text on silence.
-	// Override with WHISPER_LANG=fr/ja/etc if the meeting is not in English.
+// transcribeWAV runs `whisper-cli` against the given WAV and parses the JSON
+// output into speech segments. whisper-cli writes JSON to "<path>.json"; we
+// read that file and delete it to avoid cluttering the recordings folder.
+func transcribeWAV(wavPath string) ([]segment, error) {
+	model := whisperModelPath()
+
+	// --output-json writes "<wavPath>.json"; --no-prints silences progress
+	// chatter on stderr. Explicit -l en avoids silence-triggered language
+	// hallucinations; override via env for non-English meetings.
 	lang := os.Getenv("WHISPER_LANG")
 	if lang == "" {
 		lang = "en"
 	}
-	_ = w.WriteField("language", lang)
+	cmd := exec.Command("whisper-cli",
+		"-m", model,
+		"-f", wavPath,
+		"-l", lang,
+		"--output-json",
+		"--no-prints",
+	)
+	// whisper-cli writes Metal init logs to stderr even with --no-prints;
+	// suppress unless the caller wants diagnostics via WHISPER_VERBOSE=1.
+	if os.Getenv("WHISPER_VERBOSE") == "" {
+		cmd.Stderr = nil
+		cmd.Stdout = nil
+	} else {
+		cmd.Stderr = os.Stderr
+		cmd.Stdout = os.Stdout
+	}
 
-	h := make(textproto.MIMEHeader)
-	h.Set("Content-Disposition", `form-data; name="file"; filename="audio.wav"`)
-	h.Set("Content-Type", "audio/wav")
-	part, err := w.CreatePart(h)
+	// Run and ignore exit code — whisper-cli occasionally exits nonzero even
+	// on successful transcriptions. What matters is whether the JSON file
+	// exists afterwards with valid content.
+	_ = cmd.Run()
+
+	jsonPath := wavPath + ".json"
+	data, err := os.ReadFile(jsonPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("whisper-cli produced no JSON at %s: %w", jsonPath, err)
 	}
-	if _, err = part.Write(wavBytes); err != nil {
-		return nil, err
-	}
-	w.Close()
-
-	whisperURL := os.Getenv("WHISPER_URL")
-	if whisperURL == "" {
-		whisperURL = "https://api.openai.com/v1/audio/transcriptions"
-	}
-
-	req, err := http.NewRequest("POST", whisperURL, &body)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Content-Type", w.FormDataContentType())
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	b, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, b)
-	}
+	defer os.Remove(jsonPath)
 
 	var res struct {
-		Segments []struct {
-			Start        float64 `json:"start"`
-			End          float64 `json:"end"`
-			Text         string  `json:"text"`
-			NoSpeechProb float64 `json:"no_speech_prob"`
-		} `json:"segments"`
+		Transcription []struct {
+			Text    string `json:"text"`
+			Offsets struct {
+				From int `json:"from"` // milliseconds
+				To   int `json:"to"`
+			} `json:"offsets"`
+		} `json:"transcription"`
 	}
-	if err = json.Unmarshal(b, &res); err != nil {
-		return nil, err
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("parse whisper JSON: %w", err)
 	}
 
 	var segs []segment
-	for _, s := range res.Segments {
-		if s.NoSpeechProb >= noSpeechThreshold {
-			continue // skip — Whisper thinks this is silence/noise, not speech
+	for _, s := range res.Transcription {
+		text := strings.TrimSpace(s.Text)
+		// whisper tends to emit bracketed non-speech markers like
+		// "[MUSIC PLAYING]" or "[SILENCE]" during idle stretches — drop them.
+		if text == "" || (strings.HasPrefix(text, "[") && strings.HasSuffix(text, "]")) {
+			continue
 		}
-		segs = append(segs, segment{s.Start, s.End, strings.TrimSpace(s.Text), s.NoSpeechProb})
+		segs = append(segs, segment{
+			Start: float64(s.Offsets.From) / 1000.0,
+			End:   float64(s.Offsets.To) / 1000.0,
+			Text:  text,
+		})
 	}
 	return segs, nil
 }
