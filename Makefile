@@ -11,7 +11,8 @@ NODE_DIR    := crates/side-huddle-node
 DYLIB_DIR   := target/release
 GO_LIB_DIR  := bindings/go/lib/darwin_arm64
 
-APP_DIR      := dist/SideHuddle.app
+APP_DIR       := dist/SideHuddle.app
+INSTALL_DIR   := /Applications/SideHuddle.app
 # Override BUNDLE_ID and SIGN_ID on the command line or via env for a stable
 # TCC designated requirement tied to your own Developer ID. The defaults here
 # produce an ad-hoc signed bundle that works for local testing — grants will
@@ -20,12 +21,12 @@ APP_DIR      := dist/SideHuddle.app
 #   make bundle \
 #     BUNDLE_ID=com.acme.sidehuddle \
 #     SIGN_ID="Developer ID Application: Acme Inc (TEAMID00)"
-BUNDLE_ID    ?= com.example.sidehuddle
-SIGN_ID      ?= -
-INFO_PLIST   := tools/bundle/Info.plist
-ENTITLEMENTS := tools/bundle/side-huddle.entitlements
+BUNDLE_ID     ?= com.example.sidehuddle
+SIGN_ID       ?= -
+INFO_PLIST    := tools/bundle/Info.plist
+ENTITLEMENTS  := tools/bundle/side-huddle.entitlements
 
-.PHONY: all build release go-lib run-demo run-demo-node run-demo-python bundle run-bundle icon clean
+.PHONY: all build release go-lib run-demo run-demo-node run-demo-python bundle run-bundle install icon clean
 
 ## Regenerate the app icon from the Pillow-drawn 1024x1024 base.
 icon:
@@ -89,8 +90,18 @@ bundle: go-lib tools/bundle/SideHuddle.icns
 ## the bundle, not the hosting terminal. Direct-exec of the inner binary
 ## makes TCC walk up to the parent shell — the wrong attribution.
 run-bundle: bundle
-	open $(APP_DIR) --stdout /tmp/side-huddle.log --stderr /tmp/side-huddle.log
-	@echo "launched via LaunchServices — tail with: tail -f /tmp/side-huddle.log"
+	open $(APP_DIR) --stdout /tmp/side-hustle.log --stderr /tmp/side-hustle.log
+	@echo "launched via LaunchServices — tail with: tail -f /tmp/side-hustle.log"
+
+## Install the bundle to /Applications. Kills a running instance first so
+## the directory can be replaced. Uses ditto to preserve the code signature.
+install: bundle
+	-pkill -9 SideHuddle 2>/dev/null || true
+	@sleep 1
+	rm -rf "$(INSTALL_DIR)"
+	ditto "$(APP_DIR)" "$(INSTALL_DIR)"
+	@echo "✓ installed to $(INSTALL_DIR)"
+	@echo "  launch via: open '$(INSTALL_DIR)'"
 
 clean:
 	cargo clean

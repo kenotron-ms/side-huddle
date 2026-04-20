@@ -4,12 +4,14 @@ package main
 
 /*
 #cgo CFLAGS: -fobjc-arc
-#cgo LDFLAGS: -framework AppKit -framework Foundation -framework UserNotifications
+#cgo LDFLAGS: -framework AppKit -framework Foundation -framework UserNotifications -framework ServiceManagement -framework AVFoundation -framework CoreGraphics -framework ScreenCaptureKit
 #include <stdlib.h>
 void sh_cocoa_activate(void);
 void sh_cocoa_run(void);
 void sh_cocoa_terminate(void);
 void sh_cocoa_notify(const char *title, const char *body);
+void sh_cocoa_set_recording(int recording, const char *app, const char *title);
+const char *sh_cocoa_find_meeting_title(const char *app);
 */
 import "C"
 
@@ -47,4 +49,35 @@ func cocoaNotify(title, body string) {
 	defer C.free(unsafe.Pointer(ct))
 	defer C.free(unsafe.Pointer(cb))
 	C.sh_cocoa_notify(ct, cb)
+}
+
+// cocoaFindMeetingTitle scans on-screen windows for a non-chrome window owned
+// by `app` and returns its title. Returns "" if none is found. The Rust core's
+// window watcher is lazy and emits MeetingUpdated only once at detection, so
+// we poll this periodically to pick up the meeting window once the user has
+// it in the foreground.
+func cocoaFindMeetingTitle(app string) string {
+	ca := C.CString(app)
+	defer C.free(unsafe.Pointer(ca))
+	ct := C.sh_cocoa_find_meeting_title(ca)
+	if ct == nil {
+		return ""
+	}
+	defer C.free(unsafe.Pointer(ct))
+	return C.GoString(ct)
+}
+
+// cocoaSetRecording flips the menu-bar icon + title to reflect an in-progress
+// meeting recording. Pass recording=false to return to the idle waveform icon.
+// Safe from any goroutine — the native side hops to the main queue internally.
+func cocoaSetRecording(recording bool, app, title string) {
+	var r C.int
+	if recording {
+		r = 1
+	}
+	ca := C.CString(app)
+	ct := C.CString(title)
+	defer C.free(unsafe.Pointer(ca))
+	defer C.free(unsafe.Pointer(ct))
+	C.sh_cocoa_set_recording(r, ca, ct)
 }

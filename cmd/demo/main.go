@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -47,19 +48,28 @@ func runListener() {
 	// When runListener returns, tell NSApp to exit so the process terminates.
 	defer cocoaTerminate()
 
-	fmt.Printf("side-huddle %s — waiting for Teams / Zoom / Google Meet…\n\n", sh.Version())
+	fmt.Printf("SideHuddle %s — waiting for Teams / Zoom / Google Meet…\n\n", sh.Version())
 
-	// Proactively surface both macOS permission dialogs at launch so the user
-	// grants once on first run instead of mid-meeting. On already-granted
-	// paths these are no-ops.
-	sh.RequestScreenCapture()
+	// Surface the microphone dialog at launch — AVFoundation's request API is
+	// reliable and shows an inline Allow button. Screen Recording is NOT
+	// auto-prompted: CGRequestScreenCaptureAccess's redirect dialog on Tahoe
+	// cannot hold focus in an Accessory app and silently self-dismisses.
+	// The menu bar exposes a "Grant Screen Recording Access…" item that
+	// deep-links to Settings where the grant actually sticks.
 	sh.RequestMicrophone()
 
 	listener := sh.New()
 
+	// Recordings go under ~/Documents/SideHuddle; each meeting gets its own
+	// subfolder (created after RecordingReady — see organizeRecording).
+	baseDir := mustOutputBaseDir()
+	listener.SetOutputDir(baseDir)
+
 	wavReady := make(chan *sh.Event, 1)
 	var timeline []speakerEntry
 	var recordingStarted time.Time
+	var meeting meetingState
+	var titleStop chan struct{} // closed when current recording ends
 
 	listener.On(func(e *sh.Event) {
 		switch e.Kind {
@@ -77,6 +87,7 @@ func runListener() {
 		case sh.MeetingDetected:
 			fmt.Printf("🟢  meeting detected: %s\n", e.App)
 			cocoaNotify("Meeting detected", e.App+" — recording")
+			meeting = meetingState{started: time.Now(), app: e.App}
 			ans := prompt("   Record? [Y/n] ")
 			if strings.EqualFold(ans, "n") {
 				fmt.Println("   skipping.")
@@ -85,8 +96,27 @@ func runListener() {
 			recordingStarted = time.Now()
 			listener.Record()
 
+		case sh.MeetingUpdated:
+			kept := filterWindowTitle(e.Title, e.App)
+			if kept == "" {
+				fmt.Printf("📝  title (filtered): %q\n", e.Title)
+			} else {
+				fmt.Printf("📝  title: %q\n", kept)
+				meeting.title = kept
+				// If we're already recording, refresh the menu bar with the
+				// title that just became known (window watcher fires after
+				// MeetingDetected + often after RecordingStarted).
+				cocoaSetRecording(true, meeting.app, meeting.title)
+			}
+
 		case sh.RecordingStarted:
 			fmt.Println("⏺   recording…")
+			cocoaSetRecording(true, meeting.app, meeting.title)
+			// Start a window-title poller: the Rust core's MeetingUpdated
+			// emits only once and may grab a chrome title (Calendar tab).
+			// Scan CGWindowList ourselves until a meeting-shaped title lands.
+			titleStop = make(chan struct{})
+			go pollMeetingTitle(meeting.app, &meeting, titleStop)
 
 		case sh.SpeakerChanged:
 			entry := speakerEntry{at: time.Now(), speakers: e.Speakers}
@@ -104,11 +134,18 @@ func runListener() {
 
 		case sh.RecordingEnded:
 			fmt.Println("⏹   saving…")
+			cocoaSetRecording(false, "", "")
+			if titleStop != nil {
+				close(titleStop)
+				titleStop = nil
+			}
 
 		case sh.RecordingReady:
-			cocoaNotify("Recording saved", filepath.Base(e.Path))
+			organized := organizeRecording(e, meeting, baseDir)
+			cocoaSetRecording(false, "", "") // defensive — already cleared on RecordingEnded
+			cocoaNotify("Recording saved", filepath.Base(filepath.Dir(organized.Path)))
 			select {
-			case wavReady <- e:
+			case wavReady <- organized:
 			default:
 			}
 
@@ -405,4 +442,167 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// ── Recording output layout ──────────────────────────────────────────────────
+//
+// Each meeting's three WAVs land in ~/Documents/SideHuddle/<timestamp app [— title]>/
+// The Rust core writes all recordings to the base output dir with a shared
+// numeric stem; after RecordingReady fires we move them into a per-meeting
+// subfolder so the library remains ignorant of our naming convention.
+
+type meetingState struct {
+	started time.Time
+	app     string
+	title   string // populated from MeetingUpdated if that event arrives
+}
+
+func mustOutputBaseDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cannot resolve home dir:", err)
+		os.Exit(1)
+	}
+	dir := filepath.Join(home, "Documents", "SideHuddle")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "cannot create output dir:", err)
+		os.Exit(1)
+	}
+	return dir
+}
+
+// organizeRecording moves the three WAVs from a RecordingReady event into
+// a timestamped per-meeting subfolder under baseDir and returns a new Event
+// with the rewritten paths. If a move fails, the original path is preserved
+// on that stream so the caller still sees a valid file location.
+func organizeRecording(e *sh.Event, m meetingState, baseDir string) *sh.Event {
+	stem := m.started.Format("2006-01-02 15-04")
+	folder := stem + " " + sanitizeName(m.app)
+	if m.title != "" {
+		folder += " — " + sanitizeName(m.title)
+	}
+	dest := filepath.Join(baseDir, folder)
+	if err := os.MkdirAll(dest, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "mkdir %q: %v\n", dest, err)
+		return e
+	}
+
+	move := func(old string) string {
+		if old == "" {
+			return old
+		}
+		newPath := filepath.Join(dest, filepath.Base(old))
+		if err := os.Rename(old, newPath); err != nil {
+			fmt.Fprintf(os.Stderr, "rename %q → %q: %v\n", old, newPath, err)
+			return old
+		}
+		return newPath
+	}
+
+	out := *e
+	out.Path = move(e.Path)
+	out.OthersPath = move(e.OthersPath)
+	out.SelfPath = move(e.SelfPath)
+	return &out
+}
+
+// pollMeetingTitle scans on-screen windows every few seconds looking for a
+// non-chrome window owned by the meeting app, and updates `m.title` + the
+// menu bar when it finds a better name. Terminates when `stop` is closed.
+//
+// Needed because the Rust core's window watcher emits MeetingUpdated exactly
+// once (whichever window was first enumerated) — often the Teams chrome tab
+// that happened to be frontmost, not the actual meeting window.
+func pollMeetingTitle(app string, m *meetingState, stop <-chan struct{}) {
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			raw := cocoaFindMeetingTitle(app)
+			t := filterWindowTitle(raw, app)
+			if t == "" || t == m.title {
+				continue
+			}
+			fmt.Printf("📝  title (polled): %q\n", t)
+			m.title = t
+			cocoaSetRecording(true, m.app, t)
+		}
+	}
+}
+
+// filterWindowTitle drops window titles that are clearly app chrome (e.g.,
+// the Teams main window showing "Calendar | Microsoft Teams") and returns
+// the original title otherwise. Returning "" means "no useful title" — the
+// caller keeps whatever meeting name it already had.
+//
+// The window watcher in the Rust core grabs the first visible window from
+// the meeting app's process; if the user has Teams open on the Calendar tab
+// while a call is in progress, that chrome window can win the race over the
+// actual call window.
+func filterWindowTitle(title, app string) string {
+	title = strings.TrimSpace(title)
+	if title == "" || title == app {
+		return ""
+	}
+	switch app {
+	case "Microsoft Teams":
+		// Teams chrome titles take the shape "<TabName> | Microsoft Teams".
+		// Drop those — real meeting windows use "<MeetingName> | Microsoft Teams"
+		// but the tab names (Calendar, Chat, etc.) are enumerable; anything
+		// outside this list is likely a real meeting.
+		chromeTabs := []string{"Calendar", "Chat", "Activity", "Files", "Apps",
+			"Teams", "Settings", "Search", "Help", "More", "Home"}
+		if strings.HasSuffix(title, " | Microsoft Teams") {
+			prefix := strings.TrimSuffix(title, " | Microsoft Teams")
+			for _, tab := range chromeTabs {
+				if prefix == tab {
+					return ""
+				}
+			}
+			// Real meeting — strip the Teams-inserted junk (time prefix,
+			// bracketed channel/room tags) down to the semantic title.
+			return cleanTeamsMeetingTitle(prefix)
+		}
+	case "zoom.us", "Zoom":
+		// Zoom's main window is just "Zoom" or "Zoom Meetings"; real meeting
+		// windows have the meeting ID/name.
+		if title == "Zoom" || title == "Zoom Meetings" {
+			return ""
+		}
+	}
+	return title
+}
+
+// Teams decorates meeting window titles with a leading time range and
+// trailing channel/room tags. Strip both so the menu bar and folder name
+// show just the meaningful meeting name.
+//
+//	"2:05-2:30 BIC Product Day | Power Platform [Virtual] (General)"
+//	→ "BIC Product Day | Power Platform"
+var (
+	teamsLeadingTime = regexp.MustCompile(
+		`^\d{1,2}:\d{2}(?:\s*(?:AM|PM))?(?:\s*[-–—]\s*\d{1,2}:\d{2}(?:\s*(?:AM|PM))?)?\s+`)
+	teamsTrailingTags = regexp.MustCompile(`(?:\s*[\[(][^\])]*[\])])+$`)
+)
+
+func cleanTeamsMeetingTitle(s string) string {
+	s = teamsLeadingTime.ReplaceAllString(s, "")
+	s = teamsTrailingTags.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
+
+// sanitizeName removes characters that are illegal or awkward in macOS
+// file paths while preserving readability.
+func sanitizeName(s string) string {
+	repl := strings.NewReplacer(
+		"/", "-", ":", "-", "\\", "-",
+		"\n", " ", "\r", " ", "\t", " ",
+		"<", "(", ">", ")",
+		"|", "-", "?", "", "*", "",
+		"\"", "'",
+	)
+	return strings.TrimSpace(repl.Replace(s))
 }
