@@ -1,0 +1,185 @@
+digraph side_huddle {
+    // graph-level settings
+    graph [
+        label="side-huddle Architecture\nv0.2.0 — local meeting detection & recording",
+        labelloc=t, labeljust=c,
+        fontname="Helvetica Neue,Helvetica,Arial,sans-serif",
+        fontsize=16,
+        bgcolor="#FAFAFA",
+        pad=0.6,
+        nodesep=0.55,
+        ranksep=0.7,
+        splines=ortho,
+        rankdir=TB
+    ]
+    node [fontname="Helvetica Neue,Helvetica,Arial,sans-serif", fontsize=11, style="filled,rounded", shape=box, margin="0.18,0.1"]
+    edge [fontname="Helvetica Neue,Helvetica,Arial,sans-serif", fontsize=9, color="#555555"]
+
+    // ── 1. User Applications ──────────────────────────────────
+    subgraph cluster_apps {
+        label="User Applications"
+        style=dashed
+        color="#AAAAAA"
+        fontsize=12
+
+        go_app      [label="Go App",          fillcolor="#4A90D9", fontcolor=white]
+        py_app      [label="Python App\n(ctypes)", fillcolor="#4A90D9", fontcolor=white]
+        pyo3_app    [label="Python App\n(PyO3 / maturin)", fillcolor="#4A90D9", fontcolor=white]
+        node_app    [label="Node.js /\nTypeScript App", fillcolor="#4A90D9", fontcolor=white]
+        rust_app    [label="Rust App",        fillcolor="#4A90D9", fontcolor=white]
+        c_app       [label="C / C++ App",     fillcolor="#4A90D9", fontcolor=white]
+    }
+
+    // ── 2. Language Bindings ──────────────────────────────────
+    subgraph cluster_bindings {
+        label="Language Bindings"
+        style=dashed
+        color="#AAAAAA"
+        fontsize=12
+
+        go_bind  [label="Go Binding\nbindings/go/sidehuddle.go\npackage sidehuddle",
+                  fillcolor="#F5A623", fontcolor=white]
+        py_bind  [label="Python ctypes\nbindings/python/sidehuddle/\n__init__.py",
+                  fillcolor="#F5A623", fontcolor=white]
+        pyo3_bind [label="Python PyO3\ncrates/side-huddle-py/\nsrc/lib.rs",
+                   fillcolor="#F5A623", fontcolor=white]
+        node_bind [label="Node.js napi-rs\ncrates/side-huddle-node/\nsrc/lib.rs",
+                   fillcolor="#F5A623", fontcolor=white]
+    }
+
+    // ── 3. C ABI Surface ─────────────────────────────────────
+    subgraph cluster_cabi {
+        label="C ABI Surface"
+        style=filled
+        fillcolor="#FDF0F0"
+        color="#E74C3C"
+        fontsize=12
+
+        c_header [label="include/side_huddle.h\nSideHuddleHandle (opaque)\nSHEvent (flat struct)\nside_huddle_new/free/on\nside_huddle_start/stop\nside_huddle_auto_record",
+                  fillcolor="#E74C3C", fontcolor=white]
+        ffi_rs   [label="crates/side-huddle/src/ffi.rs\n#[no_mangle] C exports\ncdylib  ·  staticlib",
+                  fillcolor="#C0392B", fontcolor=white]
+    }
+
+    // ── 4. Rust Core ──────────────────────────────────────────
+    subgraph cluster_core {
+        label="Rust Core   crates/side-huddle/"
+        style=filled
+        fillcolor="#EBF9F1"
+        color="#2ECC71"
+        fontsize=12
+
+        lib_rs     [label="lib.rs\nEvent (11 variants)\nError, Permission\nPermissionGranted\nCaptureKind",
+                    fillcolor="#2ECC71", fontcolor=white]
+        recorder   [label="recorder.rs\nMeetingListener\nauto_record / record\nwrite_wav × 3\npermission checks",
+                    fillcolor="#27AE60", fontcolor=white]
+        monitor    [label="monitor.rs\npoll loop (300 ms)\nsustain timer (2 s)\ngrace timer (20 s)\nWindowWatcher\nSpeakerWatcher",
+                    fillcolor="#27AE60", fontcolor=white]
+        apps_rs    [label="apps.rs\nknown bundle IDs\nprocess name matchers\nwindow title matchers",
+                    fillcolor="#27AE60", fontcolor=white]
+        mix_rs     [label="mix.rs\nmix_pcm()\nmix_recordings()\nPCM interleave",
+                    fillcolor="#27AE60", fontcolor=white]
+    }
+
+    // ── 5. Platform Layer ─────────────────────────────────────
+    subgraph cluster_platform {
+        label="Platform Layer   platform/"
+        style=filled
+        fillcolor="#F5EEF8"
+        color="#9B59B6"
+        fontsize=12
+
+        subgraph cluster_darwin {
+            label="macOS (darwin/)  — full support"
+            style=filled
+            fillcolor="#EDE7F6"
+            color="#8E44AD"
+            fontsize=11
+
+            detect       [label="detect.rs\nCoreAudio mic-input poll\nprocess → bundle ID match",
+                          fillcolor="#9B59B6", fontcolor=white]
+            record_tap   [label="record_tap.rs\nCATapDescription\nsystem audio tap\n(macOS 14.2+)",
+                          fillcolor="#8E44AD", fontcolor=white]
+            record_mic   [label="record_mic.rs\nAVAudioEngine\nmicrophone capture",
+                          fillcolor="#8E44AD", fontcolor=white]
+            win_utils    [label="window.rs\nCoreGraphics utils\nwindow bounds / PID",
+                          fillcolor="#9B59B6", fontcolor=white]
+            win_watcher  [label="window_watcher.rs\nwindow-close watcher\n→ MeetingEnded",
+                          fillcolor="#8E44AD", fontcolor=white]
+            speaker_rs   [label="speaker.rs\nvisual speaker diarization\nAccessibility + Screen Capture\n→ SpeakerChanged",
+                          fillcolor="#8E44AD", fontcolor=white]
+        }
+
+        subgraph cluster_stubs {
+            label="Windows / Linux — stubs only"
+            style=dashed
+            color="#AAAAAA"
+            fontsize=11
+
+            win_stub   [label="windows/detect.rs\n(stub — no recording)",
+                        fillcolor="#95A5A6", fontcolor=white]
+            linux_stub [label="linux/detect.rs\n(stub — no recording)",
+                        fillcolor="#95A5A6", fontcolor=white]
+        }
+    }
+
+    // ── 6. OS APIs ───────────────────────────────────────────
+    subgraph cluster_os {
+        label="macOS APIs"
+        style=dashed
+        color="#AAAAAA"
+        fontsize=12
+
+        coreaudio  [label="CoreAudio",            fillcolor="#BDC3C7", fontcolor="#2C3E50"]
+        catap      [label="CATapDescription\n(macOS 14.2+)",   fillcolor="#BDC3C7", fontcolor="#2C3E50"]
+        avaudio    [label="AVAudioEngine",         fillcolor="#BDC3C7", fontcolor="#2C3E50"]
+        coregfx    [label="CoreGraphics",          fillcolor="#BDC3C7", fontcolor="#2C3E50"]
+        axapi      [label="Accessibility API",     fillcolor="#BDC3C7", fontcolor="#2C3E50"]
+    }
+
+    // ── Edges: App → Binding ──────────────────────────────────
+    go_app   -> go_bind    [label=""]
+    py_app   -> py_bind    [label=""]
+    pyo3_app -> pyo3_bind  [label=""]
+    node_app -> node_bind  [label=""]
+    rust_app -> lib_rs     [label="Rust crate (rlib)"]
+    c_app    -> c_header   [label="C header"]
+
+    // ── Edges: Binding → ABI / Core ──────────────────────────
+    go_bind   -> ffi_rs    [label="CGo staticlib" color="#F5A623"]
+    py_bind   -> ffi_rs    [label="ctypes cdylib"  color="#F5A623"]
+    pyo3_bind -> lib_rs    [label="PyO3 cdylib"    color="#F5A623"]
+    node_bind -> lib_rs    [label="napi-rs cdylib"  color="#F5A623"]
+    c_header  -> ffi_rs    [label=""]
+
+    // ── Edges: ABI → Core ────────────────────────────────────
+    ffi_rs -> recorder [label="delegates to"]
+    ffi_rs -> lib_rs   [style=dashed, label="re-exports types"]
+
+    // ── Edges: Core internal ─────────────────────────────────
+    recorder -> lib_rs   [label="fires Events"]
+    recorder -> monitor  [label="starts"]
+    monitor  -> apps_rs  [label="matches"]
+    recorder -> mix_rs   [label="mix + write WAV"]
+
+    // ── Edges: Core → Platform ───────────────────────────────
+    monitor  -> detect      [label="poll_active()"]
+    monitor  -> win_watcher [label="starts"]
+    monitor  -> speaker_rs  [label="starts"]
+    recorder -> record_tap  [label="start_tap()"]
+    recorder -> record_mic  [label="start_mic()"]
+    record_tap -> mix_rs    [label="PCM frames"]
+    record_mic -> mix_rs    [label="PCM frames"]
+
+    // ── Edges: Platform → OS ─────────────────────────────────
+    detect      -> coreaudio [label=""]
+    record_tap  -> catap     [label=""]
+    record_mic  -> avaudio   [label=""]
+    win_watcher -> coregfx   [label=""]
+    win_utils   -> coregfx   [label=""]
+    speaker_rs  -> axapi     [label=""]
+
+    // ── Force rank of OS layer at bottom ────────────────────
+    { rank=same; coreaudio; catap; avaudio; coregfx; axapi }
+    { rank=same; win_stub; linux_stub }
+}

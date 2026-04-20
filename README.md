@@ -59,7 +59,7 @@ listener.start();
 </tr>
 </table>
 
-Full guides: [Go](docs/go.md) · [Python](docs/python.md) · [Node.js](docs/node.md)
+Full guides: [Go](docs/go.md) · [Python](docs/python.md) · [Node.js](docs/node.md) · [Rust](docs/rust.md) · [C/C++](docs/c.md)
 
 ## How it works
 
@@ -112,6 +112,16 @@ The API is the same across all three language bindings:
 | `listener.start()` | Begin monitoring for meetings |
 | `listener.stop()` | Stop monitoring and cancel any active recording |
 | `version()` | Library version string |
+
+## Architecture
+
+[`docs/architecture.dot`](docs/architecture.dot) is a Graphviz DOT file showing the full binding stack — user apps → language bindings → C ABI → Rust core → macOS platform layer → OS APIs.
+
+Render it locally:
+
+```bash
+dot -Tsvg docs/architecture.dot -o docs/architecture.svg && open docs/architecture.svg
+```
 
 ## Repository structure
 
