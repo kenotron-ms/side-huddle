@@ -23,6 +23,7 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
         Event::RecordingReady { .. }    => "RecordingReady",
         Event::CaptureStatus { .. }     => "CaptureStatus",
         Event::Error { .. }             => "Error",
+        Event::SpeakerChanged { .. }    => "SpeakerChanged",
     };
     d.set_item("kind", kind)?;
 
@@ -39,8 +40,11 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
                 PermissionGranted::Denied       => "Denied",
             })?;
         }
-        Event::MeetingDetected { app }
-        | Event::MeetingEnded { app }
+        Event::MeetingDetected { app, pid } => {
+            d.set_item("app", app.as_str())?;
+            d.set_item("pid", *pid)?;
+        }
+        Event::MeetingEnded { app }
         | Event::RecordingStarted { app }
         | Event::RecordingEnded { app } => {
             d.set_item("app", app.as_str())?;
@@ -49,9 +53,11 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
             d.set_item("app", app.as_str())?;
             d.set_item("title", title.as_str())?;
         }
-        Event::RecordingReady { path, app } => {
+        Event::RecordingReady { mixed_path, others_path, self_path, app } => {
             d.set_item("app", app.as_str())?;
-            d.set_item("path", path.to_str().unwrap_or(""))?;
+            d.set_item("mixed_path",  mixed_path.to_str().unwrap_or(""))?;
+            d.set_item("others_path", others_path.to_str().unwrap_or(""))?;
+            d.set_item("self_path",   self_path.to_str().unwrap_or(""))?;
         }
         Event::CaptureStatus { kind, capturing } => {
             d.set_item("capture_kind", match kind {
@@ -62,6 +68,10 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
         }
         Event::Error { message } => {
             d.set_item("message", message.as_str())?;
+        }
+        Event::SpeakerChanged { speakers, app } => {
+            d.set_item("app", app.as_str())?;
+            d.set_item("speakers", speakers.clone())?;
         }
         Event::PermissionsGranted => {}
     }
@@ -124,6 +134,15 @@ impl Listener {
     /// Call from within a ``MeetingDetected`` handler to opt in.
     fn record(&self) {
         self.inner.record();
+    }
+
+    /// Open System Settings to grant the permissions required for recording.
+    ///
+    /// On macOS, Screen Recording cannot be requested via an inline dialog.
+    /// This opens System Settings → Privacy & Security → Screen Recording so
+    /// the user can grant access.  After granting, restart the listener.
+    fn request_permissions(&self) {
+        self.inner.request_permissions();
     }
 
     /// Set the PCM sample rate in Hz (default: 16000).
