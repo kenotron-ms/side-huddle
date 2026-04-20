@@ -16,6 +16,7 @@ import (
 	"net/textproto"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -33,7 +34,26 @@ type speakerEntry struct {
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 func main() {
+	// macOS only: bring up NSApplication on the pinned main OS thread so the
+	// Cocoa run loop pumps UI events. Without this, permission dialogs lose
+	// focus, the Dock icon bounces forever, and ⌘Q does nothing. The actual
+	// listener work runs on a background goroutine.
+	cocoaActivate()
+	go runListener()
+	cocoaRun() // blocks on [NSApp run] until runListener calls cocoaTerminate
+}
+
+func runListener() {
+	// When runListener returns, tell NSApp to exit so the process terminates.
+	defer cocoaTerminate()
+
 	fmt.Printf("side-huddle %s — waiting for Teams / Zoom / Google Meet…\n\n", sh.Version())
+
+	// Proactively surface both macOS permission dialogs at launch so the user
+	// grants once on first run instead of mid-meeting. On already-granted
+	// paths these are no-ops.
+	sh.RequestScreenCapture()
+	sh.RequestMicrophone()
 
 	listener := sh.New()
 
@@ -56,6 +76,7 @@ func main() {
 
 		case sh.MeetingDetected:
 			fmt.Printf("🟢  meeting detected: %s\n", e.App)
+			cocoaNotify("Meeting detected", e.App+" — recording")
 			ans := prompt("   Record? [Y/n] ")
 			if strings.EqualFold(ans, "n") {
 				fmt.Println("   skipping.")
@@ -79,11 +100,13 @@ func main() {
 
 		case sh.MeetingEnded:
 			fmt.Println("🔴  meeting ended")
+			cocoaNotify("Meeting ended", e.App+" — saving recording")
 
 		case sh.RecordingEnded:
 			fmt.Println("⏹   saving…")
 
 		case sh.RecordingReady:
+			cocoaNotify("Recording saved", filepath.Base(e.Path))
 			select {
 			case wavReady <- e:
 			default:

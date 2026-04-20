@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>SideHuddle</string>
+    <key>CFBundleIconFile</key>
+    <string>SideHuddle</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.example.sidehuddle</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>SideHuddle</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.2.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.2</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SideHuddle captures your microphone audio during detected meetings so you can review them locally.</string>
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>SideHuddle taps system audio from Teams / Zoom / Meet during detected meetings so you can review them locally.</string>
+</dict>
+</plist>
