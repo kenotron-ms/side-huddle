@@ -57,4 +57,23 @@
             || b.contains("org.mozilla.firefox")
             || b.contains("com.microsoft.edgemac")
     }
+
+    /// Returns `true` if the window title clearly indicates a pre-join or lobby screen
+    /// rather than an active call. Used by `detect.rs` to suppress `MeetingDetected`
+    /// when native meeting apps activate the microphone during their pre-join audio
+    /// preview (level meter, camera check, etc.).
+    ///
+    /// Coverage is best-effort: patterns are matched case-insensitively against known
+    /// app-specific strings. Teams pre-join titles are indistinguishable from in-meeting
+    /// titles by window name alone and are therefore not filtered here.
+    pub(crate) fn is_prejoin_window_title(title: &str) -> bool {
+        let lower = title.to_lowercase();
+        // Zoom: "Zoom Waiting Room" shown while waiting for the host to admit you
+        lower.contains("waiting room")
+            // Zoom pre-join device-check dialog ("Choose ONE Meeting Option")
+            || lower.contains("choose one meeting option")
+            // Transient joining state — audio may activate briefly before the call starts
+            || lower == "joining..."
+            || lower.starts_with("joining ")
+    }
     

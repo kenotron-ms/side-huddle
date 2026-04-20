@@ -122,14 +122,61 @@
             self
         }
 
+        /// Open System Settings to grant the permissions required for recording.
+        ///
+        /// On macOS, Screen Recording cannot be requested via an inline dialog — the OS
+        /// only provides a way to open System Settings → Privacy & Security → Screen
+        /// Recording.  After the user grants access there and the app restarts (or calls
+        /// [`start`](Self::start) again), recording will succeed.
+        ///
+        /// Microphone permission is handled separately: the inline OS dialog is shown
+        /// automatically the first time [`record`](Self::record) is called.
+        ///
+        /// Emits [`Event::PermissionStatus`] for each permission and
+        /// [`Event::PermissionsGranted`] if Screen Capture is already granted.
+        /// Safe to call multiple times (idempotent).
+        pub fn request_permissions(&self) {
+            #[cfg(target_os = "macos")]
+            {
+                // CGRequestScreenCaptureAccess: returns true if already granted,
+                // otherwise opens System Settings → Screen Recording and returns false.
+                // There is no blocking inline dialog for this permission — the user must
+                // grant it manually, then the listener needs to be restarted.
+                extern "C" { fn CGRequestScreenCaptureAccess() -> bool; }
+                unsafe { CGRequestScreenCaptureAccess(); }
+            }
+            // Re-check all permissions and broadcast current status.
+            // Emits PermissionsGranted if Screen Capture is now (or already was) granted.
+            check_and_emit_permissions(&self.inner);
+        }
+
         /// Start recording the current meeting.
         ///
         /// Call from within a [`Event::MeetingDetected`] handler to opt in.
         /// No-op if no meeting is active or a recording is already running.
         /// Emits [`Event::RecordingStarted`] on success, [`Event::Error`] on failure.
         pub fn record(&self) {
-            // macOS: check/request microphone permission before anything else,
-            // outside all locks so we can safely block for the dialog.
+            // macOS: check Screen Recording first — it's the hard gate for the audio
+            // tap. If it's denied, bail immediately rather than showing a microphone
+            // dialog that would only confuse the user (the tap fails regardless).
+            #[cfg(target_os = "macos")]
+            {
+                if check_screen_capture() == PermissionGranted::Denied {
+                    emit(&self.inner, &Event::PermissionStatus {
+                        permission: Permission::ScreenCapture,
+                        status:     PermissionGranted::Denied,
+                    });
+                    emit(&self.inner, &Event::Error {
+                        message: "Screen Recording access required — call request_permissions() \
+                                  to open System Settings, grant access, then restart the listener"
+                            .into(),
+                    });
+                    return;
+                }
+            }
+
+            // macOS: check/request microphone permission outside all locks so we can
+            // safely block for the dialog.
             #[cfg(target_os = "macos")]
             {
                 match check_microphone() {
@@ -309,7 +356,13 @@
         if unsafe { CGPreflightScreenCaptureAccess() } {
             PermissionGranted::Granted
         } else {
-            PermissionGranted::NotRequested
+            // CGPreflightScreenCaptureAccess() returns false for BOTH "never asked"
+            // and "explicitly denied" — no public API distinguishes them.
+            // Map both to Denied: the app cannot tap system audio in either case,
+            // and downstream code should show "Permission needed" rather than
+            // offering "Record & Transcribe" (which would fail at start_tap() anyway
+            // and incorrectly trigger the mic dialog along the way).
+            PermissionGranted::Denied
         }
     }
 
