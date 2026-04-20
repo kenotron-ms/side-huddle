@@ -23,6 +23,7 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
         Event::RecordingReady { .. }    => "RecordingReady",
         Event::CaptureStatus { .. }     => "CaptureStatus",
         Event::Error { .. }             => "Error",
+        Event::SpeakerChanged { .. }    => "SpeakerChanged",
     };
     d.set_item("kind", kind)?;
 
@@ -39,8 +40,11 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
                 PermissionGranted::Denied       => "Denied",
             })?;
         }
-        Event::MeetingDetected { app }
-        | Event::MeetingEnded { app }
+        Event::MeetingDetected { app, pid } => {
+            d.set_item("app", app.as_str())?;
+            d.set_item("pid", *pid)?;
+        }
+        Event::MeetingEnded { app }
         | Event::RecordingStarted { app }
         | Event::RecordingEnded { app } => {
             d.set_item("app", app.as_str())?;
@@ -49,9 +53,11 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
             d.set_item("app", app.as_str())?;
             d.set_item("title", title.as_str())?;
         }
-        Event::RecordingReady { path, app } => {
+        Event::RecordingReady { mixed_path, others_path, self_path, app } => {
             d.set_item("app", app.as_str())?;
-            d.set_item("path", path.to_str().unwrap_or(""))?;
+            d.set_item("mixed_path",  mixed_path.to_str().unwrap_or(""))?;
+            d.set_item("others_path", others_path.to_str().unwrap_or(""))?;
+            d.set_item("self_path",   self_path.to_str().unwrap_or(""))?;
         }
         Event::CaptureStatus { kind, capturing } => {
             d.set_item("capture_kind", match kind {
@@ -62,6 +68,10 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
         }
         Event::Error { message } => {
             d.set_item("message", message.as_str())?;
+        }
+        Event::SpeakerChanged { speakers, app } => {
+            d.set_item("app", app.as_str())?;
+            d.set_item("speakers", speakers.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
         }
         Event::PermissionsGranted => {}
     }
