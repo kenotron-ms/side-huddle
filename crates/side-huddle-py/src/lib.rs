@@ -71,7 +71,7 @@ fn event_to_py(py: Python<'_>, event: &Event) -> PyResult<PyObject> {
         }
         Event::SpeakerChanged { speakers, app } => {
             d.set_item("app", app.as_str())?;
-            d.set_item("speakers", speakers.clone())?;
+            d.set_item("speakers", speakers.iter().map(|s| s.as_str()).collect::<Vec<_>>())?;
         }
         Event::PermissionsGranted => {}
     }

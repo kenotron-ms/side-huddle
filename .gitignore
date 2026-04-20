@@ -41,6 +41,12 @@ build/
 *.wav
 *.txt              # Whisper transcript output
 
+# ── macOS bundle build ────────────────────────────────────────────────────────
+# dist/ is already ignored above (Python section) which covers the .app output.
+# Intermediate icon build artifacts — only the final SideHuddle.icns is committed.
+tools/bundle/SideHuddle.iconset/
+tools/bundle/SideHuddle-1024.png
+
 # ── macOS ─────────────────────────────────────────────────────────────────────
 .DS_Store
 .AppleDouble
