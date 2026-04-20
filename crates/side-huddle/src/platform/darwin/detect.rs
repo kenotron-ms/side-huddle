@@ -15,7 +15,7 @@
 
     use crate::apps::{identify_by_bundle, is_browser_bundle};
     use super::process::proc_name_for_pid;
-    use super::window::window_title_for_audio_input_pid;
+    use super::window::{cg_window_owner, find_primary_window, window_title_for_audio_input_pid};
 
     /// Poll CoreAudio process objects. Returns (pid, friendly_app_name) of the
     /// first meeting-app process that currently has IsRunningInput == 1.
@@ -46,6 +46,22 @@
                     crate::apps::identify_by_proc_name(&name).map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| bundle.clone());
+
+            // For native apps, apply a window-title pre-join guard — the same in
+            // spirit as the browser window-title gate above. Meeting apps such as
+            // Zoom activate the microphone during their pre-join screen (camera /
+            // mic level preview), which makes `IsRunningInput` fire before the user
+            // is actually in a call. If the primary window title matches a known
+            // pre-join pattern, skip this poll cycle and wait for a real meeting.
+            //
+            // Limitation: Teams pre-join titles are indistinguishable from
+            // in-meeting titles by window name; that case is not filtered here.
+            let owner = cg_window_owner(&app);
+            if let Some((_id, ref title)) = find_primary_window(&owner) {
+                if crate::apps::is_prejoin_window_title(title) {
+                    continue; // clear pre-join state — not in a meeting yet
+                }
+            }
 
             return (pid, app);
         }

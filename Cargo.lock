@@ -1398,7 +1398,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "side-huddle"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "core-foundation",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "side-huddle-py"
-version = "0.1.0"
+version = "0.2.1"
 dependencies = [
  "pyo3",
  "side-huddle",

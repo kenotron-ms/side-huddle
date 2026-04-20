@@ -1,6 +1,6 @@
 {
   "name": "side-huddle",
-  "version": "0.1.2",
+  "version": "0.2.1",
   "description": "Detect meetings locally and capture audio as WAV",
   "main": "index.js",
   "napi": {

@@ -136,6 +136,15 @@ impl Listener {
         self.inner.record();
     }
 
+    /// Open System Settings to grant the permissions required for recording.
+    ///
+    /// On macOS, Screen Recording cannot be requested via an inline dialog.
+    /// This opens System Settings → Privacy & Security → Screen Recording so
+    /// the user can grant access.  After granting, restart the listener.
+    fn request_permissions(&self) {
+        self.inner.request_permissions();
+    }
+
     /// Set the PCM sample rate in Hz (default: 16000).
     /// Must be called before :meth:`start`.
     fn set_sample_rate(&self, hz: u32) {
