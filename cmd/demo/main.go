@@ -168,16 +168,24 @@ func runListener() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
-	select {
-	case ev := <-wavReady:
-		fmt.Printf("💾  saved:\n")
-		fmt.Printf("    mixed  → %s\n", ev.Path)
-		fmt.Printf("    others → %s\n", ev.OthersPath)
-		fmt.Printf("    self   → %s\n\n", ev.SelfPath)
-		printTimeline(timeline, recordingStarted)
-		offerTranscription(ev, timeline, recordingStarted)
-	case <-quit:
-		fmt.Println("\nshutting down…")
+	// Keep the listener alive across meetings — this is a menu-bar agent, not
+	// a one-shot. Each RecordingReady prints the save summary + optional
+	// transcription, resets per-meeting state, and waits for the next meeting.
+	// Only ⌘Q (→ cocoaTerminate) or SIGINT breaks the loop.
+	for {
+		select {
+		case ev := <-wavReady:
+			fmt.Printf("💾  saved:\n")
+			fmt.Printf("    mixed  → %s\n", ev.Path)
+			fmt.Printf("    others → %s\n", ev.OthersPath)
+			fmt.Printf("    self   → %s\n\n", ev.SelfPath)
+			printTimeline(timeline, recordingStarted)
+			offerTranscription(ev, timeline, recordingStarted)
+			timeline = timeline[:0] // clear for the next meeting
+		case <-quit:
+			fmt.Println("\nshutting down…")
+			return
+		}
 	}
 }
 
