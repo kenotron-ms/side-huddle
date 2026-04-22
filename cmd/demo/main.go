@@ -99,16 +99,22 @@ func runListener() {
 				app:              e.App,
 				participantsSeen: make(map[string]bool),
 			}
-			// Post an actionable "Record / Skip" notification and wait up to
-			// 30 s.  Timeout = record (mirrors the old [Y/n] default).
-			ch := cocoaNotifyRecordChoice(e.App)
-			if !waitRecordChoice(ch, 30*time.Second) {
-				fmt.Println("   skipping (user chose Skip).")
-				return
-			}
-			fmt.Println("   recording.")
+			// Post the notification and return immediately — blocking here would
+			// stall the Rust-side CGo event dispatch and prevent MeetingEnded
+			// from ever firing (recording would never stop).
+			// The goroutine waits for the user's tap (or 30s timeout) then starts
+			// recording.  recordingStarted is set now so SpeakerChanged offsets
+			// are correct even if recording starts a few seconds later.
 			recordingStarted = time.Now()
-			listener.Record()
+			ch := cocoaNotifyRecordChoice(e.App)
+			go func() {
+				if !waitRecordChoice(ch, 30*time.Second) {
+					fmt.Println("   skipping (user chose Skip).")
+					return
+				}
+				fmt.Println("   recording.")
+				listener.Record()
+			}()
 
 		case sh.MeetingUpdated:
 			kept := filterWindowTitle(e.Title, e.App)
