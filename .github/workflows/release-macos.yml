@@ -1,0 +1,56 @@
+name: Release macOS App
+
+# Fires on any v* tag push.
+# Produces a signed, notarized, stapled DMG published as a GitHub Release.
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# Required secrets (repo Settings → Secrets and variables → Actions → Secrets):
+#
+#   APPLE_CERTIFICATE_P12        base64-encoded .p12 Developer ID Application cert
+#                                  base64 -i DeveloperIDApplication.p12 | pbcopy
+#   APPLE_CERTIFICATE_PASSWORD   export password set when creating the .p12
+#   APPLE_APP_PASSWORD           app-specific password from appleid.apple.com
+#                                  (Sign-In and Security → App-Specific Passwords)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  macos-app:
+    name: Build · Sign · Notarize · Release
+    runs-on: macos-14    # arm64 (M1) — matches darwin_arm64 static lib target
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build, sign, notarize, and package
+        env:
+          APPLE_CERTIFICATE_P12:       ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD:  ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_APP_PASSWORD:          ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash packaging/macos/package.sh arm64 "$VERSION"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files:                   dist/SideHuddle-*.dmg
+          generate_release_notes:  true
+          fail_on_unmatched_files: true

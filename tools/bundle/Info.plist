@@ -19,13 +19,20 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.2.0</string>
+    <string>0.2.1</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.2</string>
+    <!-- Menu-bar agent: hide from Dock, App Switcher, and Mission Control -->
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <!-- "alert" style keeps banners on screen until dismissed — required for
+         the "Record this meeting?" actionable notification to stay visible. -->
+    <key>NSUserNotificationAlertStyle</key>
+    <string>alert</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>SideHuddle captures your microphone audio during detected meetings so you can review them locally.</string>
     <key>NSScreenCaptureUsageDescription</key>

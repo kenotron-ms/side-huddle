@@ -14,6 +14,7 @@
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <UserNotifications/UserNotifications.h>
 #import <ServiceManagement/ServiceManagement.h>
+#include "_cgo_export.h"  // goRecordChoiceCallback
 
 // Forward declarations — the menu controller methods read gStatusItem, which
 // is defined below. Keep the statics near the top so every later method can
@@ -22,10 +23,17 @@ static NSStatusItem *gStatusItem;
 static id            gController; // SHController on macOS 13+
 static BOOL          gNotifAuthRequested = NO;
 
+// Notification category/action identifiers
+static NSString * const kCatRecordChoice = @"SH_RECORD_CHOICE";
+static NSString * const kCatOpenFolder   = @"SH_OPEN_FOLDER";
+static NSString * const kActRecord       = @"RECORD";
+static NSString * const kActSkip         = @"SKIP";
+static NSString * const kActOpenFolder   = @"OPEN_FOLDER";
+
 // ── Menu controller ──────────────────────────────────────────────────────────
 
 API_AVAILABLE(macos(13.0))
-@interface SHController : NSObject <NSMenuDelegate>
+@interface SHController : NSObject <NSMenuDelegate, UNUserNotificationCenterDelegate>
 @property (nonatomic, weak) NSMenuItem *headerItem;
 @property (nonatomic, weak) NSMenuItem *micItem;
 @property (nonatomic, weak) NSMenuItem *screenItem;
@@ -40,6 +48,13 @@ API_AVAILABLE(macos(13.0))
 - (void)openMicSettings:(id)sender;
 - (void)openScreenRecordingSettings:(id)sender;
 - (void)openDocumentsFolder:(id)sender;
+// UNUserNotificationCenterDelegate
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+   didReceiveNotificationResponse:(UNNotificationResponse *)response
+            withCompletionHandler:(void (^)(void))completionHandler;
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+        withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler;
 @end
 
 @implementation SHController
@@ -208,6 +223,42 @@ API_AVAILABLE(macos(13.0))
     [[NSWorkspace sharedWorkspace] openURL:dir];
 }
 
+// ── UNUserNotificationCenterDelegate ─────────────────────────────────────────
+
+// Always show banners even when the app is in the foreground (menu bar agents
+// have no window so technically they're never "foreground", but be explicit).
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
+    (void)center; (void)notification;
+    completionHandler(UNNotificationPresentationOptionBanner |
+                      UNNotificationPresentationOptionSound);
+}
+
+// Handle action-button taps and notification-body taps.
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+  didReceiveNotificationResponse:(UNNotificationResponse *)response
+           withCompletionHandler:(void (^)(void))completionHandler {
+    (void)center;
+    NSString *action   = response.actionIdentifier;
+    NSString *category = response.notification.request.content.categoryIdentifier;
+
+    if ([category isEqualToString:kCatRecordChoice]) {
+        // Tapping the notification body or the "Record" button → record.
+        // Tapping "Skip" → do not record.
+        int shouldRecord = 1;
+        if ([action isEqualToString:kActSkip]) shouldRecord = 0;
+        goRecordChoiceCallback((GoInt32)shouldRecord);
+
+    } else if ([action isEqualToString:kActOpenFolder]) {
+        NSString *folder = response.notification.request.content.userInfo[@"folder_path"];
+        if (folder.length) {
+            [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:folder]];
+        }
+    }
+    completionHandler();
+}
+
 @end
 
 // ── Exported C entry points ─────────────────────────────────────────────────
@@ -235,6 +286,43 @@ void sh_cocoa_activate(void) {
 
     if (@available(macOS 13.0, *)) {
         SHController *c = [[SHController alloc] init];
+
+        // ── Register notification categories ──────────────────────────────
+        // Category 1: record-or-skip choice when a meeting is detected.
+        UNNotificationAction *recordAct = [UNNotificationAction
+            actionWithIdentifier:kActRecord
+                           title:@"🔴 Record"
+                         options:UNNotificationActionOptionNone];
+        UNNotificationAction *skipAct = [UNNotificationAction
+            actionWithIdentifier:kActSkip
+                           title:@"Skip"
+                         options:UNNotificationActionOptionDestructive];
+        UNNotificationCategory *recordCat = [UNNotificationCategory
+            categoryWithIdentifier:kCatRecordChoice
+                           actions:@[recordAct, skipAct]
+                 intentIdentifiers:@[]
+                           options:UNNotificationCategoryOptionNone];
+
+        // Category 2: deep-link to the meeting folder (recordings / transcripts).
+        UNNotificationAction *openAct = [UNNotificationAction
+            actionWithIdentifier:kActOpenFolder
+                           title:@"Open Folder"
+                         options:UNNotificationActionOptionNone];
+        UNNotificationCategory *folderCat = [UNNotificationCategory
+            categoryWithIdentifier:kCatOpenFolder
+                           actions:@[openAct]
+                 intentIdentifiers:@[]
+                           options:UNNotificationCategoryOptionNone];
+
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        [center setNotificationCategories:[NSSet setWithObjects:recordCat, folderCat, nil]];
+        center.delegate = c;     // delivers banners in foreground + handles action taps
+        gNotifAuthRequested = YES;
+        [center requestAuthorizationWithOptions:
+            UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+                              completionHandler:^(BOOL granted, NSError *error) {
+            (void)granted; (void)error;
+        }];
 
         NSMenuItem *micItem = [menu addItemWithTitle:@"Grant Microphone Access…"
                                               action:@selector(openMicSettings:)
@@ -341,16 +429,7 @@ void sh_cocoa_set_recording(int recording, const char *app, const char *title) {
 }
 
 void sh_cocoa_notify(const char *title, const char *body) {
-    UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
-
-    if (!gNotifAuthRequested) {
-        gNotifAuthRequested = YES;
-        [center requestAuthorizationWithOptions:UNAuthorizationOptionAlert | UNAuthorizationOptionSound
-                              completionHandler:^(BOOL granted, NSError * _Nullable error) {
-            (void)granted; (void)error;
-        }];
-    }
-
+    // Auth is requested once in sh_cocoa_activate; no need to repeat it here.
     UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
     content.title = [NSString stringWithUTF8String:title];
     content.body  = [NSString stringWithUTF8String:body];
@@ -360,7 +439,59 @@ void sh_cocoa_notify(const char *title, const char *body) {
         requestWithIdentifier:[[NSUUID UUID] UUIDString]
                       content:content
                       trigger:nil];
-    [center addNotificationRequest:req withCompletionHandler:^(NSError * _Nullable error) {
-        (void)error;
+    [[UNUserNotificationCenter currentNotificationCenter]
+        addNotificationRequest:req withCompletionHandler:^(NSError * _Nullable error) {
+            (void)error;
+    }];
+}
+
+// Post an actionable "Record this meeting?" notification.
+// The response is delivered via goRecordChoiceCallback() on the UNCenter delegate.
+void sh_cocoa_notify_record_choice(const char *app_cstr) {
+    NSString *app = app_cstr ? [NSString stringWithUTF8String:app_cstr] : @"meeting";
+
+    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+    content.title              = @"Meeting detected";
+    content.body               = [NSString stringWithFormat:@"%@ — record this meeting?", app];
+    content.sound              = [UNNotificationSound defaultSound];
+    content.categoryIdentifier = kCatRecordChoice;
+
+    // Use a fixed identifier so a new detection replaces the previous one.
+    UNNotificationRequest *req = [UNNotificationRequest
+        requestWithIdentifier:@"sh-record-choice"
+                      content:content
+                      trigger:nil];
+    [[UNUserNotificationCenter currentNotificationCenter]
+        addNotificationRequest:req withCompletionHandler:^(NSError * _Nullable error) {
+            (void)error;
+    }];
+}
+
+// Post a notification with an "Open Folder" action button that deep-links to
+// folder_path in Finder when tapped.  folder_path is stored in userInfo so the
+// delegate can open the right folder even if multiple notifications are queued.
+void sh_cocoa_notify_with_folder(const char *title_cstr,
+                                  const char *body_cstr,
+                                  const char *folder_cstr) {
+    NSString *title  = title_cstr  ? [NSString stringWithUTF8String:title_cstr]  : @"";
+    NSString *body   = body_cstr   ? [NSString stringWithUTF8String:body_cstr]   : @"";
+    NSString *folder = folder_cstr ? [NSString stringWithUTF8String:folder_cstr] : @"";
+
+    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+    content.title              = title;
+    content.body               = body;
+    content.sound              = [UNNotificationSound defaultSound];
+    content.categoryIdentifier = kCatOpenFolder;
+    if (folder.length) {
+        content.userInfo = @{@"folder_path": folder};
+    }
+
+    UNNotificationRequest *req = [UNNotificationRequest
+        requestWithIdentifier:[[NSUUID UUID] UUIDString]
+                      content:content
+                      trigger:nil];
+    [[UNUserNotificationCenter currentNotificationCenter]
+        addNotificationRequest:req withCompletionHandler:^(NSError * _Nullable error) {
+            (void)error;
     }];
 }

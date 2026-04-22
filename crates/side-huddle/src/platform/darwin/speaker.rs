@@ -231,23 +231,32 @@ fn sample_border(px: &[u8], iw: i32, ih: i32, tx: f64, ty: f64, tw: f64, th: f64
 
 // ── Window discovery ──────────────────────────────────────────────────────────
 
-fn find_meeting_window(owner: &str) -> Option<(u32, f64, f64, f64, f64)> {
+/// Returns ALL eligible meeting windows for `owner`, sorted largest-first.
+///
+/// Teams shows two windows during an active call: the main meeting window
+/// (large, all participant tiles visible) and a compact "mini" overlay window
+/// that floats when the main window is out of focus (small, shows only the
+/// current speaker). Both need to be examined so tiles in either window can
+/// trigger speaker detection.
+fn find_meeting_windows(owner: &str) -> Vec<(u32, f64, f64, f64, f64)> {
     use core_graphics::window::{CGWindowListCopyWindowInfo, kCGNullWindowID, kCGWindowListOptionAll};
 
     let skip = ["Calendar","Chat","Activity","Calls","OneDrive","Teams NRC",
                 "Microsoft Teams\0","Viva","Engage","Copilot"];
 
     let list = unsafe { CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID) };
-    if list.is_null() { return None; }
+    if list.is_null() { return vec![]; }
     let n = unsafe { CFArrayGetCount(list as _) };
 
-    let mut meeting: Option<(u32,f64,f64,f64,f64)> = None;
+    let mut meeting_wins: Vec<(u32,f64,f64,f64,f64)> = Vec::new();
     let mut fallback: Option<(f64,u32,f64,f64,f64,f64)> = None;
 
     for i in 0..n {
         let item = unsafe { CFArrayGetValueAtIndex(list as _, i) } as CFDictionaryRef;
         if item.is_null() { continue; }
-        if cg_i32(item,"kCGWindowLayer") != 0 { continue; }
+        // Allow layer 0 (normal) and small positive layers (floating panels / compact overlay)
+        let layer = cg_i32(item,"kCGWindowLayer");
+        if layer < 0 || layer > 3 { continue; }
         let win_owner = cg_str(item,"kCGWindowOwnerName").unwrap_or_default();
         if !win_owner.to_lowercase().contains(&owner.to_lowercase()) { continue; }
         let id = cg_i32(item,"kCGWindowNumber") as u32;
@@ -257,14 +266,17 @@ fn find_meeting_window(owner: &str) -> Option<(u32, f64, f64, f64, f64)> {
         if bd_val.is_null() { continue; }
         let bd = bd_val as CFDictionaryRef;
         let (x,y,w,h) = (cg_f64(bd,"X"),cg_f64(bd,"Y"),cg_f64(bd,"Width"),cg_f64(bd,"Height"));
-        if w < 200.0 || h < 200.0 { continue; }
+        // Slightly relaxed height threshold (150) to catch compact overlay windows
+        if w < 200.0 || h < 150.0 { continue; }
         let title = cg_str(item,"kCGWindowName").unwrap_or_default();
         let is_meeting = !title.is_empty()
             && !skip.iter().any(|s| title.starts_with(s))
             && title != "Microsoft Teams";
         if let Some(img) = capture_window_cg(id) {
             unsafe { CGImageRelease(img); }
-            if is_meeting && meeting.is_none() { meeting = Some((id,x,y,w,h)); }
+            if is_meeting {
+                meeting_wins.push((id,x,y,w,h));  // collect ALL meeting windows
+            }
             let area = w*h;
             if fallback.as_ref().map_or(true,|(a,_,_,_,_,_)| area>*a) {
                 fallback = Some((area,id,x,y,w,h));
@@ -272,7 +284,15 @@ fn find_meeting_window(owner: &str) -> Option<(u32, f64, f64, f64, f64)> {
         }
     }
     unsafe { CFRelease(list as CFTypeRef); }
-    meeting.or_else(|| fallback.map(|(_,id,x,y,w,h)| (id,x,y,w,h)))
+
+    if !meeting_wins.is_empty() {
+        // Sort largest first — main window leads, mini overlay follows
+        meeting_wins.sort_by(|a, b|
+            (b.3*b.4).partial_cmp(&(a.3*a.4)).unwrap_or(std::cmp::Ordering::Equal));
+        meeting_wins
+    } else {
+        fallback.map(|(_,id,x,y,w,h)| vec![(id,x,y,w,h)]).unwrap_or_default()
+    }
 }
 
 fn cg_i32(d: CFDictionaryRef, k: &str) -> i32 {
@@ -304,48 +324,83 @@ fn cg_str(d: CFDictionaryRef, k: &str) -> Option<String> {
 
 static PREV_FRAME: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
 
-/// Capture one frame and return the names of currently-speaking participants.
+/// Capture one frame across all visible meeting windows and return the names
+/// of currently-speaking participants.
+///
+/// Each AX tile is matched to whichever window's screen-bounds contain its
+/// centre point.  All eligible windows are captured; the primary (largest)
+/// window is used for frame-diff detection of brief ring flashes.
 pub(crate) fn probe_once(app: &str, pid: u32) -> Vec<String> {
     let owner = super::window::cg_window_owner(app);
-    let Some((win_id, wx, wy, ww, wh)) = find_meeting_window(&owner) else { return vec![]; };
+    let windows = find_meeting_windows(&owner);
+    if windows.is_empty() { return vec![]; }
 
     let tiles = std::panic::catch_unwind(|| ax_find_tiles(pid as i32)).unwrap_or_default();
     if tiles.is_empty() { return vec![]; }
 
-    let in_window: Vec<&Tile> = tiles.iter().filter(|t| {
-        let cx = t.x + t.w / 2.0; let cy = t.y + t.h / 2.0;
-        cx >= wx && cx < wx+ww && cy >= wy && cy < wy+wh
+    // Map each tile to the window whose bounds contain its centre point.
+    struct TileWin<'a> { tile: &'a Tile, win_id: u32, wx: f64, wy: f64, ww: f64, wh: f64 }
+    let tile_wins: Vec<TileWin> = tiles.iter().filter_map(|t| {
+        let cx = t.x + t.w / 2.0;
+        let cy = t.y + t.h / 2.0;
+        for &(wid, wx, wy, ww, wh) in &windows {
+            if cx >= wx && cx < wx+ww && cy >= wy && cy < wy+wh {
+                return Some(TileWin { tile: t, win_id: wid, wx, wy, ww, wh });
+            }
+        }
+        None
     }).collect();
-    if in_window.is_empty() { return vec![]; }
+    if tile_wins.is_empty() { return vec![]; }
 
-    let Some(img_ref) = capture_window_cg(win_id) else { return vec![]; };
-    let rgba = cg_image_to_rgba(img_ref);
-    unsafe { CGImageRelease(img_ref); }
-    let Some((pixels, img_w, img_h)) = rgba else { return vec![]; };
-
-    let sx = img_w as f64 / ww;
-    let sy = img_h as f64 / wh;
-
-    // Frame diff: new chromatic pixels = ring appearing
-    let mut prev = PREV_FRAME.lock().unwrap();
-    let diff_px: u32 = if prev.len() == pixels.len() {
-        pixels.chunks(4).zip(prev.chunks(4)).map(|(c,o)| {
-            let delta = ((c[0] as i32-o[0] as i32).abs()
-                       + (c[1] as i32-o[1] as i32).abs()
-                       + (c[2] as i32-o[2] as i32).abs()) as u32;
-            if delta > 20 && is_saturated(c[0],c[1],c[2]) { 1u32 } else { 0 }
-        }).sum()
+    // Frame diff on primary (largest) window only — catches brief ring flashes.
+    let (primary_id, _, _, pw, ph) = windows[0];
+    let diff_px: u32 = if let Some(img_ref) = capture_window_cg(primary_id) {
+        let rgba = cg_image_to_rgba(img_ref);
+        unsafe { CGImageRelease(img_ref); }
+        if let Some((pixels, _, _)) = rgba {
+            let mut prev = PREV_FRAME.lock().unwrap();
+            let dp: u32 = if prev.len() == pixels.len() {
+                pixels.chunks(4).zip(prev.chunks(4)).map(|(c, o)| {
+                    let d = ((c[0] as i32-o[0] as i32).abs()
+                           + (c[1] as i32-o[1] as i32).abs()
+                           + (c[2] as i32-o[2] as i32).abs()) as u32;
+                    if d > 20 && is_saturated(c[0], c[1], c[2]) { 1u32 } else { 0 }
+                }).sum()
+            } else { 0 };
+            *prev = pixels;
+            dp
+        } else { 0 }
     } else { 0 };
-    *prev = pixels.clone();
-    drop(prev);
+
+    // Capture each needed window once, then run per-tile pixel analysis.
+    let needed_ids: std::collections::BTreeSet<u32> =
+        tile_wins.iter().map(|tw| tw.win_id).collect();
+    let img_cache: std::collections::HashMap<u32, Option<(Vec<u8>, i32, i32)>> =
+        needed_ids.iter().map(|&id| {
+            let rgba = capture_window_cg(id).and_then(|img_ref| {
+                let r = cg_image_to_rgba(img_ref);
+                unsafe { CGImageRelease(img_ref); }
+                r
+            });
+            (id, rgba)
+        }).collect();
+
+    let _ = (pw, ph); // suppress unused-variable warnings on the primary window dims
 
     let mut speakers = Vec::new();
-    for tile in in_window {
-        let rx = (tile.x - wx) * sx;
-        let ry = (tile.y - wy) * sy;
-        let ratio = sample_border(&pixels, img_w, img_h, rx, ry, tile.w * sx, tile.h * sy);
-        if ratio > 0.02 || diff_px > 200 {
-            speakers.push(tile.name.clone());
+    for tw in &tile_wins {
+        if let Some(Some((pixels, img_w, img_h))) = img_cache.get(&tw.win_id) {
+            let sx = *img_w as f64 / tw.ww;
+            let sy = *img_h as f64 / tw.wh;
+            let rx = (tw.tile.x - tw.wx) * sx;
+            let ry = (tw.tile.y - tw.wy) * sy;
+            let ratio = sample_border(pixels, *img_w, *img_h,
+                                      rx, ry, tw.tile.w * sx, tw.tile.h * sy);
+            // diff_px fires for ALL tiles when ANY window flashes — conservative
+            // but acceptable: a flash means someone just started speaking.
+            if ratio > 0.02 || diff_px > 200 {
+                speakers.push(tw.tile.name.clone());
+            }
         }
     }
     speakers

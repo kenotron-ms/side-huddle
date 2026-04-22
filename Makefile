@@ -1,34 +1,54 @@
-# side-huddle build & run targets
+# side-huddle build & distribution
 #
-# Usage:
-#   make              — build everything
-#   make run-demo     — run the Go demo
-#   make run-demo-node   — run the Node.js demo
-#   make run-demo-python — run the Python demo
-#   make clean        — remove build artifacts
+# ── Dev workflow ──────────────────────────────────────────────────────────────
+#   make                  debug build (cargo + go)
+#   make run-demo         run the Go demo from the terminal
+#   make bundle           .app bundle (ad-hoc signed, for your machine only)
+#   make run-bundle       bundle → open via LaunchServices
+#   make install          bundle → /Applications (local dev)
+#
+# ── Release workflow ──────────────────────────────────────────────────────────
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+#   GitHub Actions (.github/workflows/release-macos.yml) fires automatically
+#   and runs packaging/macos/package.sh with your stored secrets.
+#
+#   To do a release locally (e.g. to test the full pipeline):
+#     APPLE_CERTIFICATE_P12=<base64>        \
+#     APPLE_CERTIFICATE_PASSWORD=<pass>     \
+#     APPLE_APP_PASSWORD=<app-specific-pw>  \
+#     make dist
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Local overrides: copy config.mk.example → config.mk and fill in your values.
+# config.mk is gitignored; it never leaves your machine.
+-include config.mk
 
 NODE_DIR    := crates/side-huddle-node
 DYLIB_DIR   := target/release
 GO_LIB_DIR  := bindings/go/lib/darwin_arm64
 
-APP_DIR       := dist/SideHuddle.app
-INSTALL_DIR   := /Applications/SideHuddle.app
-# Override BUNDLE_ID and SIGN_ID on the command line or via env for a stable
-# TCC designated requirement tied to your own Developer ID. The defaults here
-# produce an ad-hoc signed bundle that works for local testing — grants will
-# reset on every rebuild because ad-hoc signatures have no stable DR.
-#
-#   make bundle \
-#     BUNDLE_ID=com.acme.sidehuddle \
-#     SIGN_ID="Developer ID Application: Acme Inc (TEAMID00)"
-BUNDLE_ID     ?= com.example.sidehuddle
-SIGN_ID       ?= -
-INFO_PLIST    := tools/bundle/Info.plist
-ENTITLEMENTS  := tools/bundle/side-huddle.entitlements
+APP_DIR     := dist/SideHuddle.app
+INSTALL_DIR := /Applications/SideHuddle.app
+INFO_PLIST  := tools/bundle/Info.plist
+ENTITLEMENTS:= tools/bundle/side-huddle.entitlements
 
-.PHONY: all build release go-lib run-demo run-demo-node run-demo-python bundle run-bundle install icon clean
+# Ad-hoc signing identity for local dev bundles.
+# package.sh uses the hardcoded Developer ID Application for real releases.
+SIGN_ID     ?= -
 
-## Regenerate the app icon from the Pillow-drawn 1024x1024 base.
+# Version: prefer the latest git tag, else Cargo workspace version.
+APP_VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null \
+                 | sed 's/^v//' \
+                 || grep '^version' Cargo.toml | head -1 \
+                      | sed 's/.*"\(.*\)".*/\1/')
+
+.PHONY: all build release go-lib run-demo run-demo-node run-demo-python \
+        bundle run-bundle install icon verify dist clean
+
+# ── Source targets ────────────────────────────────────────────────────────────
+
 icon:
 	tools/bundle/make-icon.sh
 
@@ -37,71 +57,71 @@ tools/bundle/SideHuddle.icns: tools/bundle/make-icon.sh
 
 all: build
 
-## Debug Rust build + verify Go compiles
 build:
 	cargo build
 	go build ./...
 
-## napi-rs Node.js addon (release) — also builds the Rust library
 release:
 	cd $(NODE_DIR) && npx napi build --platform --release
 
-## Build the static archive used by the Go binding (darwin/arm64)
 go-lib:
 	cargo build --release -p side-huddle
 	cp $(DYLIB_DIR)/libside_huddle.a $(GO_LIB_DIR)/libside_huddle.a
 
-## Run the Go demo (rebuilds static archive + node addon first)
-## Uses `go build -a` to force CGo to relink the fresh archive — avoids
-## stale-cache bugs where `go run` skips relinking after archive changes.
 DEMO_BIN := /tmp/side-huddle-demo
 
 run-demo: go-lib release
 	go build -a -o $(DEMO_BIN) ./cmd/demo
 	$(DEMO_BIN)
 
-## Run the Node.js demo (builds release first)
 run-demo-node: release
 	node bindings/node/demo.js
 
-## Run the Python demo (no build step needed — pure ctypes)
 run-demo-python:
 	python3 bindings/python/demo.py
 
-## Build a codesigned .app bundle so TCC (Screen Recording / Microphone)
-## attaches to a stable designated requirement instead of whatever terminal
-## hosts the CLI. With a real Developer ID, TCC grants survive rebuilds.
+# ── Local dev bundle (ad-hoc signed, your machine only) ──────────────────────
+
 bundle: go-lib tools/bundle/SideHuddle.icns
 	rm -rf $(APP_DIR)
 	mkdir -p $(APP_DIR)/Contents/MacOS $(APP_DIR)/Contents/Resources
 	go build -a -o $(APP_DIR)/Contents/MacOS/SideHuddle ./cmd/demo
 	cp $(INFO_PLIST) $(APP_DIR)/Contents/Info.plist
 	cp tools/bundle/SideHuddle.icns $(APP_DIR)/Contents/Resources/SideHuddle.icns
-	plutil -replace CFBundleIdentifier -string "$(BUNDLE_ID)" \
-		$(APP_DIR)/Contents/Info.plist
-	codesign --force --options runtime \
-		--entitlements $(ENTITLEMENTS) \
-		-s "$(SIGN_ID)" \
+	plutil -replace CFBundleIdentifier          -string "com.ms.side-huddle"  $(APP_DIR)/Contents/Info.plist
+	plutil -replace CFBundleShortVersionString  -string "$(APP_VERSION)"      $(APP_DIR)/Contents/Info.plist
+	codesign --force --options runtime          \
+		--entitlements $(ENTITLEMENTS)          \
+		-s "$(SIGN_ID)"                         \
 		$(APP_DIR)
-	@echo "--- signature ---"
-	@codesign -dvv $(APP_DIR) 2>&1 | grep -E "Identifier|Authority|TeamIdentifier" || true
+	@echo "── signature ─────────────────────────────────"
+	@codesign -dvv $(APP_DIR) 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|flags" || true
+	@echo "──────────────────────────────────────────────"
 
-## Launch the signed bundle via LaunchServices so TCC attributes perms to
-## the bundle, not the hosting terminal. Direct-exec of the inner binary
-## makes TCC walk up to the parent shell — the wrong attribution.
+verify:
+	codesign --verify --deep --strict --verbose=2 $(APP_DIR)
+	spctl --assess --type exec --verbose $(APP_DIR) 2>&1 || \
+	  echo "(spctl fails on ad-hoc / un-notarized bundles — expected for local builds)"
+
 run-bundle: bundle
 	open $(APP_DIR) --stdout /tmp/side-hustle.log --stderr /tmp/side-hustle.log
-	@echo "launched via LaunchServices — tail with: tail -f /tmp/side-hustle.log"
+	@echo "launched — tail: tail -f /tmp/side-hustle.log"
 
-## Install the bundle to /Applications. Kills a running instance first so
-## the directory can be replaced. Uses ditto to preserve the code signature.
 install: bundle
 	-pkill -9 SideHuddle 2>/dev/null || true
 	@sleep 1
 	rm -rf "$(INSTALL_DIR)"
 	ditto "$(APP_DIR)" "$(INSTALL_DIR)"
 	@echo "✓ installed to $(INSTALL_DIR)"
-	@echo "  launch via: open '$(INSTALL_DIR)'"
+
+# ── Release (sign + notarize + staple + DMG) ─────────────────────────────────
+# Delegates to packaging/macos/package.sh which contains the full pipeline.
+# Requires APPLE_CERTIFICATE_P12, APPLE_CERTIFICATE_PASSWORD, APPLE_APP_PASSWORD.
+
+dist:
+	bash packaging/macos/package.sh arm64 "$(APP_VERSION)"
+
+# ── Housekeeping ──────────────────────────────────────────────────────────────
 
 clean:
 	cargo clean

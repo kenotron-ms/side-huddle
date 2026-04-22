@@ -16,6 +16,7 @@ import (
 	"net/textproto"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -65,7 +66,14 @@ func runListener() {
 	baseDir := mustOutputBaseDir()
 	listener.SetOutputDir(baseDir)
 
-	wavReady := make(chan *sh.Event, 1)
+	// wavReadyEvent bundles a RecordingReady event with a frozen meeting
+	// snapshot so the transcription goroutine sees the correct 1:1 state
+	// even if a second meeting starts before the first is transcribed.
+	type wavReadyEvent struct {
+		ev      *sh.Event
+		meeting meetingState
+	}
+	wavReady := make(chan wavReadyEvent, 1)
 	var timeline []speakerEntry
 	var recordingStarted time.Time
 	var meeting meetingState
@@ -86,13 +94,19 @@ func runListener() {
 
 		case sh.MeetingDetected:
 			fmt.Printf("🟢  meeting detected: %s\n", e.App)
-			cocoaNotify("Meeting detected", e.App+" — recording")
-			meeting = meetingState{started: time.Now(), app: e.App}
-			ans := prompt("   Record? [Y/n] ")
-			if strings.EqualFold(ans, "n") {
-				fmt.Println("   skipping.")
+			meeting = meetingState{
+				started:          time.Now(),
+				app:              e.App,
+				participantsSeen: make(map[string]bool),
+			}
+			// Post an actionable "Record / Skip" notification and wait up to
+			// 30 s.  Timeout = record (mirrors the old [Y/n] default).
+			ch := cocoaNotifyRecordChoice(e.App)
+			if !waitRecordChoice(ch, 30*time.Second) {
+				fmt.Println("   skipping (user chose Skip).")
 				return
 			}
+			fmt.Println("   recording.")
 			recordingStarted = time.Now()
 			listener.Record()
 
@@ -126,6 +140,13 @@ func runListener() {
 				fmt.Printf("   🔇 [%s] silence\n", fmtOffset(offset))
 			} else {
 				fmt.Printf("   🎤 [%s] %s\n", fmtOffset(offset), strings.Join(e.Speakers, " + "))
+				// Track unique remote-speaker names for 1:1 detection later.
+				if meeting.participantsSeen == nil {
+					meeting.participantsSeen = make(map[string]bool)
+				}
+				for _, name := range e.Speakers {
+					meeting.participantsSeen[name] = true
+				}
 			}
 
 		case sh.MeetingEnded:
@@ -143,9 +164,10 @@ func runListener() {
 		case sh.RecordingReady:
 			organized := organizeRecording(e, meeting, baseDir)
 			cocoaSetRecording(false, "", "") // defensive — already cleared on RecordingEnded
-			cocoaNotify("Recording saved", filepath.Base(filepath.Dir(organized.Path)))
+			folder := filepath.Dir(organized.Path)
+			cocoaNotifyWithFolder("Recording ready", filepath.Base(folder), folder)
 			select {
-			case wavReady <- organized:
+			case wavReady <- wavReadyEvent{ev: organized, meeting: meeting}:
 			default:
 			}
 
@@ -174,13 +196,14 @@ func runListener() {
 	// Only ⌘Q (→ cocoaTerminate) or SIGINT breaks the loop.
 	for {
 		select {
-		case ev := <-wavReady:
+		case ready := <-wavReady:
+			ev := ready.ev
 			fmt.Printf("💾  saved:\n")
 			fmt.Printf("    mixed  → %s\n", ev.Path)
 			fmt.Printf("    others → %s\n", ev.OthersPath)
 			fmt.Printf("    self   → %s\n\n", ev.SelfPath)
 			printTimeline(timeline, recordingStarted)
-			offerTranscription(ev, timeline, recordingStarted)
+			runTranscription(ev, ready.meeting, timeline, recordingStarted)
 			timeline = timeline[:0] // clear for the next meeting
 		case <-quit:
 			fmt.Println("\nshutting down…")
@@ -241,17 +264,32 @@ type transcriptResult struct {
 	err      error
 }
 
-func offerTranscription(ev *sh.Event, timeline []speakerEntry, recStart time.Time) {
+// runTranscription automatically transcribes all three WAV streams when
+// OPENAI_API_KEY is set.  For 1:1 meetings it assigns speakers directly from
+// the stream separation (others = them, self = me) for perfect diarization.
+// For group meetings it uses the visual-ring timeline as before.
+// Notifications are sent at start and completion so the user can track progress.
+func runTranscription(ev *sh.Event, m meetingState, timeline []speakerEntry, recStart time.Time) {
 	apiKey := os.Getenv("OPENAI_API_KEY")
 	if apiKey == "" {
-		fmt.Println("(set OPENAI_API_KEY to transcribe)")
+		fmt.Println("(set OPENAI_API_KEY to enable transcription)")
 		return
 	}
 
-	ans := prompt("Transcribe? [Y/n] ")
-	if strings.EqualFold(ans, "n") {
-		return
+	folder := filepath.Dir(ev.Path)
+	meetingLabel := filepath.Base(folder)
+
+	// Determine display names for 1:1 diarization.
+	one2one := isOneOnOne(m)
+	var otherName, myName string
+	if one2one {
+		otherName = otherPersonName(m)
+		myName = myDisplayName()
+		fmt.Printf("\U0001f465  1:1 detected — %s (them) vs %s (me)\n", otherName, myName)
 	}
+
+	cocoaNotifyWithFolder("Transcribing…", meetingLabel, folder)
+	fmt.Println("\U0001f4dd  transcribing all streams…")
 
 	streams := []struct{ label, path string }{
 		{"mixed", ev.Path},
@@ -268,35 +306,52 @@ func offerTranscription(ev *sh.Event, timeline []speakerEntry, recStart time.Tim
 				ch <- transcriptResult{r.label, r.path, nil, nil}
 				return
 			}
-			fmt.Printf("📝  transcribing %s…\n", r.label)
+			fmt.Printf("\U0001f4dd  transcribing %s…\n", r.label)
 			segs, err := transcribeWAV(r.path, apiKey)
 			ch <- transcriptResult{r.label, r.path, segs, err}
 		}()
 	}
 
 	results := map[string][]segment{}
-	paths := map[string]string{}
-	for _, r := range streams {
-		paths[r.label] = r.path
-	}
 	for range streams {
 		r := <-ch
 		if r.err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️   transcription failed (%s): %v\n", r.label, r.err)
+			fmt.Fprintf(os.Stderr, "\u26a0\ufe0f   transcription failed (%s): %v\n", r.label, r.err)
 			continue
 		}
 		if len(r.segments) == 0 {
 			continue
 		}
-		// Write plain-text version alongside the WAV
+		// Determine fixed speaker label for this stream (1:1 only).
+		fixedSpeaker := ""
+		if one2one {
+			switch r.label {
+			case "others":
+				fixedSpeaker = otherName
+			case "self":
+				fixedSpeaker = myName
+			}
+		} else if r.label == "self" {
+			fixedSpeaker = "Me"
+		}
+		// Write plain-text transcript alongside the WAV.
 		txtPath := strings.TrimSuffix(r.path, ".wav") + ".txt"
 		var sb strings.Builder
 		for _, s := range r.segments {
-			fmt.Fprintf(&sb, "[%s] %s\n", fmtSecs(s.Start), strings.TrimSpace(s.Text))
+			if fixedSpeaker != "" {
+				fmt.Fprintf(&sb, "[%s] <%s> %s\n", fmtSecs(s.Start), fixedSpeaker, strings.TrimSpace(s.Text))
+			} else {
+				fmt.Fprintf(&sb, "[%s] %s\n", fmtSecs(s.Start), strings.TrimSpace(s.Text))
+			}
 		}
 		_ = os.WriteFile(txtPath, []byte(sb.String()), 0644)
-		fmt.Printf("✅  %s → %s\n", r.label, txtPath)
+		fmt.Printf("\u2705  %s \u2192 %s\n", r.label, txtPath)
 		results[r.label] = r.segments
+	}
+
+	// For 1:1: also write a merged transcript sorted by timestamp.
+	if one2one {
+		writeMerged1on1Transcript(ev, results, otherName, myName, folder)
 	}
 
 	fmt.Println()
@@ -306,15 +361,19 @@ func offerTranscription(ev *sh.Event, timeline []speakerEntry, recStart time.Tim
 		if !ok {
 			continue
 		}
-		fmt.Printf("── Transcript (%s) %s\n", label, strings.Repeat("─", max(0, 38-len(label))))
+		fmt.Printf("\u2500\u2500 Transcript (%s) %s\n", label, strings.Repeat("\u2500", max(0, 38-len(label))))
 		for _, s := range segs {
-			speaker := ""
-			if label == "mixed" && len(timeline) > 0 {
-				speaker = speakerAt(timeline, recStart, s.Start, s.End)
-				if speaker != "" {
-					speaker = " <" + speaker + ">"
+			var speaker string
+			switch {
+			case one2one && label == "others":
+				speaker = " <" + otherName + ">"
+			case one2one && label == "self":
+				speaker = " <" + myName + ">"
+			case label == "mixed" && len(timeline) > 0:
+				if sp := speakerAt(timeline, recStart, s.Start, s.End); sp != "" {
+					speaker = " <" + sp + ">"
 				}
-			} else if label == "self" {
+			case label == "self":
 				speaker = " <me>"
 			}
 			fmt.Printf("  [%s]%s %s\n", fmtSecs(s.Start), speaker, strings.TrimSpace(s.Text))
@@ -324,7 +383,45 @@ func offerTranscription(ev *sh.Event, timeline []speakerEntry, recStart time.Tim
 	if !printed {
 		fmt.Println("(no transcript — audio may have been too short)")
 	}
-	fmt.Println(strings.Repeat("─", 57))
+	fmt.Println(strings.Repeat("\u2500", 57))
+
+	cocoaNotifyWithFolder("Transcript ready", meetingLabel, folder)
+}
+
+// writeMerged1on1Transcript writes a single conversation-style .txt file that
+// interleaves both speakers in chronological order, named after the meeting.
+func writeMerged1on1Transcript(ev *sh.Event, results map[string][]segment,
+	otherName, myName, folder string) {
+	others := results["others"]
+	self := results["self"]
+	if len(others) == 0 && len(self) == 0 {
+		return
+	}
+	type turn struct {
+		start  float64
+		speaker string
+		text   string
+	}
+	var turns []turn
+	for _, s := range others {
+		turns = append(turns, turn{s.Start, otherName, strings.TrimSpace(s.Text)})
+	}
+	for _, s := range self {
+		turns = append(turns, turn{s.Start, myName, strings.TrimSpace(s.Text)})
+	}
+	// Sort by start time
+	for i := 1; i < len(turns); i++ {
+		for j := i; j > 0 && turns[j].start < turns[j-1].start; j-- {
+			turns[j], turns[j-1] = turns[j-1], turns[j]
+		}
+	}
+	var sb strings.Builder
+	for _, t := range turns {
+		fmt.Fprintf(&sb, "[%s] <%s> %s\n", fmtSecs(t.start), t.speaker, t.text)
+	}
+	mergedPath := filepath.Join(folder, "conversation.txt")
+	_ = os.WriteFile(mergedPath, []byte(sb.String()), 0644)
+	fmt.Printf("\u2705  1:1 merged \u2192 %s\n", mergedPath)
 }
 
 // speakerAt finds the most active speaker during [segStart, segEnd] seconds
@@ -438,13 +535,6 @@ func transcribeWAV(wavPath, apiKey string) ([]segment, error) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-func prompt(question string) string {
-	fmt.Print(question)
-	var line string
-	fmt.Scanln(&line)
-	return strings.TrimSpace(line)
-}
-
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -460,9 +550,10 @@ func max(a, b int) int {
 // subfolder so the library remains ignorant of our naming convention.
 
 type meetingState struct {
-	started time.Time
-	app     string
-	title   string // populated from MeetingUpdated if that event arrives
+	started          time.Time
+	app              string
+	title            string          // populated from MeetingUpdated / title poller
+	participantsSeen map[string]bool // unique remote-speaker names from SpeakerChanged
 }
 
 func mustOutputBaseDir() string {
@@ -483,11 +574,15 @@ func mustOutputBaseDir() string {
 // a timestamped per-meeting subfolder under baseDir and returns a new Event
 // with the rewritten paths. If a move fails, the original path is preserved
 // on that stream so the caller still sees a valid file location.
+// organizeRecording moves the three WAVs from a RecordingReady event into
+// a timestamped per-meeting subfolder under baseDir, renames them to include
+// the meeting title so files are self-describing, and returns a new Event
+// with the rewritten paths.
 func organizeRecording(e *sh.Event, m meetingState, baseDir string) *sh.Event {
 	stem := m.started.Format("2006-01-02 15-04")
 	folder := stem + " " + sanitizeName(m.app)
 	if m.title != "" {
-		folder += " — " + sanitizeName(m.title)
+		folder += " \u2014 " + sanitizeName(m.title)
 	}
 	dest := filepath.Join(baseDir, folder)
 	if err := os.MkdirAll(dest, 0o755); err != nil {
@@ -495,23 +590,44 @@ func organizeRecording(e *sh.Event, m meetingState, baseDir string) *sh.Event {
 		return e
 	}
 
-	move := func(old string) string {
+	// Build a short, readable filename stem from the meeting title (or a
+	// fallback) so the WAV files are self-describing inside the folder.
+	fileStem := fileStemFromMeeting(m)
+
+	move := func(old, suffix string) string {
 		if old == "" {
 			return old
 		}
-		newPath := filepath.Join(dest, filepath.Base(old))
+		newPath := filepath.Join(dest, fileStem+suffix+".wav")
 		if err := os.Rename(old, newPath); err != nil {
-			fmt.Fprintf(os.Stderr, "rename %q → %q: %v\n", old, newPath, err)
+			fmt.Fprintf(os.Stderr, "rename %q \u2192 %q: %v\n", old, newPath, err)
 			return old
 		}
 		return newPath
 	}
 
 	out := *e
-	out.Path = move(e.Path)
-	out.OthersPath = move(e.OthersPath)
-	out.SelfPath = move(e.SelfPath)
+	out.Path = move(e.Path, "")
+	out.OthersPath = move(e.OthersPath, "-others")
+	out.SelfPath = move(e.SelfPath, "-self")
 	return &out
+}
+
+// fileStemFromMeeting returns a short filename-safe stem for the three WAV
+// files inside a meeting folder.  When a title is available, it is preferred
+// (truncated to 50 characters) so the files are self-describing.
+func fileStemFromMeeting(m meetingState) string {
+	if m.title != "" {
+		s := sanitizeName(m.title)
+		if len([]rune(s)) > 50 {
+			runes := []rune(s)
+			s = strings.TrimSpace(string(runes[:50]))
+		}
+		if s != "" {
+			return s
+		}
+	}
+	return "recording"
 }
 
 // pollMeetingTitle scans on-screen windows every few seconds looking for a
@@ -601,6 +717,55 @@ func cleanTeamsMeetingTitle(s string) string {
 	s = teamsTrailingTags.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
 }
+
+// isOneOnOne returns true when the meeting appears to be a 1:1:
+// - the title explicitly contains "1:1" / "1 on 1" / "1on1", OR
+// - the visual-ring diarization only ever detected a single remote participant.
+// In 1:1 meetings the stream separation already gives us perfect speaker
+// attribution (others.wav = them, self.wav = me) with no further processing.
+func isOneOnOne(m meetingState) bool {
+	lower := strings.ToLower(m.title)
+	if strings.Contains(lower, "1:1") ||
+		strings.Contains(lower, "1 on 1") ||
+		strings.Contains(lower, "1on1") {
+		return true
+	}
+	return len(m.participantsSeen) == 1
+}
+
+// otherPersonName resolves the remote participant's display name for 1:1
+// meetings.  It prefers the name that appeared in SpeakerChanged events (i.e.
+// the name Teams showed on the speaking-ring tile), and falls back to
+// extracting a name from the meeting title.
+func otherPersonName(m meetingState) string {
+	for name := range m.participantsSeen {
+		return name // only one entry in a true 1:1
+	}
+	// Fallback: strip "1:1", "1 on 1", connector words, and the app name
+	// to extract the counterpart's name from the meeting title.
+	s := m.title
+	s = regexp.MustCompile(`(?i)\b1[:\s-]?(?:on|o[n]?)[\s-]?1\b|1:1`).ReplaceAllString(s, "")
+	s = strings.NewReplacer("with", "", "WITH", "", "With", "").Replace(s)
+	s = strings.Trim(strings.TrimSpace(s), " -—–|")
+	if s != "" && s != m.app {
+		return s
+	}
+	return "Guest"
+}
+
+// myDisplayName returns the current user's macOS display name (Full Name in
+// System Settings), falling back to the UNIX username.  Used to label the
+// "self" audio stream in 1:1 transcripts.
+func myDisplayName() string {
+	if u, err := user.Current(); err == nil {
+		if u.Name != "" {
+			return u.Name
+		}
+		return u.Username
+	}
+	return "Me"
+}
+
 
 // sanitizeName removes characters that are illegal or awkward in macOS
 // file paths while preserving readability.

@@ -1,0 +1,28 @@
+# Local build configuration — copy this to config.mk and fill in your values.
+#
+#   cp config.mk.example config.mk
+#
+# config.mk is gitignored, so these values never leave your machine.
+# With this in place you can just run:
+#
+#   make dist       — full pipeline (build → sign → notarize → staple → DMG)
+#   make bundle     — quick local signed build
+#   make install    — signed bundle → /Applications
+#
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Reverse-DNS bundle identifier you own.
+# Must match what you configured in your provisioning/notarization profile.
+BUNDLE_ID = com.yourname.sidehuddle
+
+# Full "Developer ID Application" string from your login keychain.
+# Find it with:
+#   security find-identity -v -p codesigning | grep "Developer ID Application"
+SIGN_ID = Developer ID Application: Your Name (ABCDE12345)
+
+# Keychain profile created once with:
+#   xcrun notarytool store-credentials "SideHuddle" \
+#       --apple-id  "you@example.com"               \
+#       --team-id   "ABCDE12345"                     \
+#       --password  "<app-specific-password>"
+NOTARIZE_PROFILE = SideHuddle
