@@ -271,6 +271,14 @@ API_AVAILABLE(macos(13.0))
 
 // ── Exported C entry points ─────────────────────────────────────────────────
 
+// sh_has_bundle returns YES when the process is running inside a real .app bundle.
+// UNUserNotificationCenter crashes when called from a bare binary (e.g. the
+// /tmp/side-huddle-demo produced by make run-demo) because mainBundle has no
+// bundle identifier. Guard every notification call with this check.
+static BOOL sh_has_bundle(void) {
+    return [[NSBundle mainBundle] bundleIdentifier] != nil;
+}
+
 void sh_cocoa_activate(void) {
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -322,15 +330,19 @@ void sh_cocoa_activate(void) {
                  intentIdentifiers:@[]
                            options:UNNotificationCategoryOptionNone];
 
-        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
-        [center setNotificationCategories:[NSSet setWithObjects:recordCat, folderCat, nil]];
-        center.delegate = c;     // delivers banners in foreground + handles action taps
-        gNotifAuthRequested = YES;
-        [center requestAuthorizationWithOptions:
-            UNAuthorizationOptionAlert | UNAuthorizationOptionSound
-                              completionHandler:^(BOOL granted, NSError *error) {
-            (void)granted; (void)error;
-        }];
+        // UNUserNotificationCenter requires a proper .app bundle and crashes
+        // when called from a bare binary (e.g. make run-demo → /tmp/...).
+        if (sh_has_bundle()) {
+            UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+            [center setNotificationCategories:[NSSet setWithObjects:recordCat, folderCat, nil]];
+            center.delegate = c;     // delivers banners in foreground + handles action taps
+            gNotifAuthRequested = YES;
+            [center requestAuthorizationWithOptions:
+                UNAuthorizationOptionAlert | UNAuthorizationOptionSound
+                                  completionHandler:^(BOOL granted, NSError *error) {
+                (void)granted; (void)error;
+            }];
+        }
 
         NSMenuItem *micItem = [menu addItemWithTitle:@"Grant Microphone Access…"
                                               action:@selector(openMicSettings:)
@@ -447,6 +459,7 @@ void sh_cocoa_set_recording(int recording, const char *app, const char *title) {
 }
 
 void sh_cocoa_notify(const char *title, const char *body) {
+    if (!sh_has_bundle()) return; // no bundle — can't use UNUserNotificationCenter
     // Auth is requested once in sh_cocoa_activate; no need to repeat it here.
     UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
     content.title = [NSString stringWithUTF8String:title];
@@ -552,6 +565,7 @@ void sh_cocoa_show_record_alert(const char *app_cstr) {
 // Post an actionable "Record this meeting?" notification.
 // The response is delivered via goRecordChoiceCallback() on the UNCenter delegate.
 void sh_cocoa_notify_record_choice(const char *app_cstr) {
+    if (!sh_has_bundle()) return; // no bundle — can't use UNUserNotificationCenter
     NSString *app = app_cstr ? [NSString stringWithUTF8String:app_cstr] : @"meeting";
 
     UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
@@ -577,6 +591,7 @@ void sh_cocoa_notify_record_choice(const char *app_cstr) {
 void sh_cocoa_notify_with_folder(const char *title_cstr,
                                   const char *body_cstr,
                                   const char *folder_cstr) {
+    if (!sh_has_bundle()) return; // no bundle — can't use UNUserNotificationCenter
     NSString *title  = title_cstr  ? [NSString stringWithUTF8String:title_cstr]  : @"";
     NSString *body   = body_cstr   ? [NSString stringWithUTF8String:body_cstr]   : @"";
     NSString *folder = folder_cstr ? [NSString stringWithUTF8String:folder_cstr] : @"";
