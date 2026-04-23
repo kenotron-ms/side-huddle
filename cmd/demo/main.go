@@ -51,13 +51,15 @@ func runListener() {
 
 	fmt.Printf("SideHuddle %s — waiting for Teams / Zoom / Google Meet…\n\n", sh.Version())
 
-	// Surface the microphone dialog at launch — AVFoundation's request API is
-	// reliable and shows an inline Allow button. Screen Recording is NOT
-	// auto-prompted: CGRequestScreenCaptureAccess's redirect dialog on Tahoe
-	// cannot hold focus in an Accessory app and silently self-dismisses.
-	// The menu bar exposes a "Grant Screen Recording Access…" item that
-	// deep-links to Settings where the grant actually sticks.
+	// Surface permission dialogs at launch so the user can grant access before
+	// the first meeting is detected.
+	//
+	// Both calls now dispatch to the main queue and temporarily switch to
+	// NSApplicationActivationPolicyRegular (see perms_darwin.m), which ensures
+	// the dialogs are attributed to SideHuddle and can hold focus — previously
+	// CGRequestScreenCaptureAccess self-dismissed in Accessory mode on macOS 26.
 	sh.RequestMicrophone()
+	sh.RequestScreenCapture()
 
 	listener := sh.New()
 
