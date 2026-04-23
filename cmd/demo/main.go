@@ -135,8 +135,11 @@ func runListener() {
 			// Start a window-title poller: the Rust core's MeetingUpdated
 			// emits only once and may grab a chrome title (Calendar tab).
 			// Scan CGWindowList ourselves until a meeting-shaped title lands.
+			// The poller also watches for the meeting window to close and
+			// calls StopRecording() as a Go-side fallback alongside the
+			// Rust window watcher.
 			titleStop = make(chan struct{})
-			go pollMeetingTitle(meeting.app, &meeting, titleStop)
+			go pollMeetingTitle(meeting.app, &meeting, listener, titleStop)
 
 		case sh.SpeakerChanged:
 			entry := speakerEntry{at: time.Now(), speakers: e.Speakers}
@@ -636,29 +639,50 @@ func fileStemFromMeeting(m meetingState) string {
 	return "recording"
 }
 
-// pollMeetingTitle scans on-screen windows every few seconds looking for a
-// non-chrome window owned by the meeting app, and updates `m.title` + the
-// menu bar when it finds a better name. Terminates when `stop` is closed.
+// pollMeetingTitle scans on-screen windows every few seconds to:
+//  1. Update m.title + the menu bar when a better meeting-shaped title is found.
+//  2. Detect meeting-window closure as a Go-side fallback alongside the Rust
+//     window watcher. Phase 1 finds the primary meeting window by ID; Phase 2
+//     watches that ID for removal and calls l.StopRecording() when it's gone.
 //
-// Needed because the Rust core's window watcher emits MeetingUpdated exactly
-// once (whichever window was first enumerated) — often the Teams chrome tab
-// that happened to be frontmost, not the actual meeting window.
-func pollMeetingTitle(app string, m *meetingState, stop <-chan struct{}) {
+// The goroutine exits when `stop` is closed (i.e. when RecordingEnded fires).
+func pollMeetingTitle(app string, m *meetingState, l *sh.Listener, stop <-chan struct{}) {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
+
+	var watchID uint32 // Phase 2: CGWindowID of the identified meeting window
+
 	for {
 		select {
 		case <-stop:
 			return
 		case <-ticker.C:
+			// ── Title update ──────────────────────────────────────────────
 			raw := cocoaFindMeetingTitle(app)
 			t := filterWindowTitle(raw, app)
-			if t == "" || t == m.title {
-				continue
+			if t != "" && t != m.title {
+				fmt.Printf("📝  title (polled): %q\n", t)
+				m.title = t
+				cocoaSetRecording(true, m.app, t)
 			}
-			fmt.Printf("📝  title (polled): %q\n", t)
-			m.title = t
-			cocoaSetRecording(true, m.app, t)
+
+			// ── Window-close detection (Go-side fallback) ─────────────────
+			if watchID == 0 {
+				// Phase 1: find the primary meeting window by CGWindowID.
+				// cocoaFindMeetingWindowID picks the largest layer-0 window
+				// owned by app, mirroring the Rust window watcher's logic.
+				if id := cocoaFindMeetingWindowID(app); id != 0 {
+					watchID = id
+					fmt.Printf("👁   watching window %d for closure\n", watchID)
+				}
+			} else {
+				// Phase 2: has the watched window been destroyed?
+				if !cocoaWindowExists(watchID) {
+					fmt.Println("🔴  meeting window closed (Go-side detection) — stopping recording")
+					l.StopRecording()
+					return
+				}
+			}
 		}
 	}
 }

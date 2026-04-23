@@ -5,6 +5,7 @@ package main
 /*
 #cgo CFLAGS: -fobjc-arc
 #cgo LDFLAGS: -framework AppKit -framework Foundation -framework UserNotifications -framework ServiceManagement -framework AVFoundation -framework CoreGraphics -framework ScreenCaptureKit
+#include <stdint.h>
 #include <stdlib.h>
 void sh_cocoa_activate(void);
 void sh_cocoa_run(void);
@@ -12,6 +13,8 @@ void sh_cocoa_terminate(void);
 void sh_cocoa_notify(const char *title, const char *body);
 void sh_cocoa_set_recording(int recording, const char *app, const char *title);
 const char *sh_cocoa_find_meeting_title(const char *app);
+uint32_t sh_cocoa_find_meeting_window_id(const char *app);
+int sh_cocoa_window_exists(uint32_t window_id);
 */
 import "C"
 
@@ -80,4 +83,18 @@ func cocoaSetRecording(recording bool, app, title string) {
 	defer C.free(unsafe.Pointer(ca))
 	defer C.free(unsafe.Pointer(ct))
 	C.sh_cocoa_set_recording(r, ca, ct)
+}
+
+// cocoaFindMeetingWindowID returns the CGWindowID of the largest on-screen
+// layer-0 window owned by app (case-insensitive substring), or 0 if not found.
+func cocoaFindMeetingWindowID(app string) uint32 {
+	ca := C.CString(app)
+	defer C.free(unsafe.Pointer(ca))
+	return uint32(C.sh_cocoa_find_meeting_window_id(ca))
+}
+
+// cocoaWindowExists returns true if a window with the given CGWindowID is
+// still present in the full window list (including hidden/minimized windows).
+func cocoaWindowExists(id uint32) bool {
+	return C.sh_cocoa_window_exists(C.uint32_t(id)) != 0
 }

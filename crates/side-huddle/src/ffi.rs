@@ -284,6 +284,15 @@
             as_listener(handle).record();
         }
 
+        /// Stop the active recording without stopping the meeting monitor.
+        ///
+        /// # Safety
+        /// `handle` must be valid.
+        #[no_mangle]
+        pub unsafe extern "C" fn side_huddle_stop_recording(handle: *const c_void) {
+            as_listener(handle).stop_recording();
+        }
+
         /// Set the PCM sample rate (default: 16 000 Hz).  Call before `side_huddle_start`.
         ///
         /// # Safety

@@ -234,6 +234,13 @@ package sidehuddle
     	C.side_huddle_record(l.handle)
     }
 
+    // StopRecording stops the active recording without halting the meeting monitor.
+    // No-op if no recording is active. RecordingEnded and RecordingReady fire
+    // asynchronously after the WAV files are written.
+    func (l *Listener) StopRecording() {
+    	C.side_huddle_stop_recording(l.handle)
+    }
+
     // SetSampleRate sets the PCM sample rate in Hz (default: 16000).
     // Must be called before Start.
     func (l *Listener) SetSampleRate(hz uint32) *Listener {

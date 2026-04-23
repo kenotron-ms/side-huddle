@@ -119,6 +119,11 @@
      *  Call from within a SH_MEETING_DETECTED callback to opt in. */
     void side_huddle_record(SideHuddleHandle handle);
 
+    /** Stop the active recording without stopping the meeting monitor.
+     *  No-op if no recording is active. RecordingEnded and RecordingReady
+     *  events fire asynchronously after the WAV files are written. */
+    void side_huddle_stop_recording(SideHuddleHandle handle);
+
     /** Set the PCM sample rate in Hz (default: 16000).  Call before side_huddle_start(). */
     void side_huddle_set_sample_rate(SideHuddleHandle handle, uint32_t hz);
 

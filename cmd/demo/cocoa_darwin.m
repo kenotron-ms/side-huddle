@@ -38,6 +38,7 @@ API_AVAILABLE(macos(13.0))
 @property (nonatomic, weak) NSMenuItem *micItem;
 @property (nonatomic, weak) NSMenuItem *screenItem;
 @property (nonatomic, weak) NSMenuItem *loginItem;
+@property (nonatomic, weak) NSMenuItem *stopItem;   // hidden except while recording
 @property (nonatomic)       BOOL       isRecording;
 @property (nonatomic, copy) NSString  *currentApp;
 @property (nonatomic, copy) NSString  *currentTitle;
@@ -106,8 +107,15 @@ API_AVAILABLE(macos(13.0))
     self.isRecording  = rec;
     self.currentApp   = app   ?: @"";
     self.currentTitle = title ?: @"";
+    // Show the "Stop Recording" item only while a recording is in progress.
+    self.stopItem.hidden  = !rec;
+    self.stopItem.enabled =  rec;
     [self refreshStatusItem];
     [self refresh]; // update the menu header even when menu isn't open
+}
+
+- (void)stopRecording:(id)sender {
+    goStopRecordingCallback();
 }
 
 // Updates the menu-bar status item icon. Red record-dot while recording,
@@ -350,10 +358,20 @@ void sh_cocoa_activate(void) {
 
         [menu addItem:[NSMenuItem separatorItem]];
 
+        // "⏹ Stop Recording" — only visible while actively recording.
+        NSMenuItem *stopItem = [menu addItemWithTitle:@"\u23F9  Stop Recording"
+                                               action:@selector(stopRecording:)
+                                        keyEquivalent:@""];
+        stopItem.target = c;
+        stopItem.hidden  = YES;
+
+        [menu addItem:[NSMenuItem separatorItem]];
+
         c.headerItem = header;
         c.micItem    = micItem;
         c.screenItem = scrItem;
         c.loginItem  = loginItem;
+        c.stopItem   = stopItem;
         menu.delegate = c;
         gController = c;
         [c refresh];
@@ -443,6 +461,92 @@ void sh_cocoa_notify(const char *title, const char *body) {
         addNotificationRequest:req withCompletionHandler:^(NSError * _Nullable error) {
             (void)error;
     }];
+}
+
+// Return the CGWindowID of the largest on-screen layer-0 window (≥10 000 px²)
+// whose CGWindowOwnerName contains `app` (case-insensitive). Returns 0 if not found.
+// Mirrors Rust's find_primary_window logic so both watchers agree on the window.
+uint32_t sh_cocoa_find_meeting_window_id(const char *app_cstr) {
+    if (!app_cstr) return 0;
+    NSString *appLower = [[NSString stringWithUTF8String:app_cstr] lowercaseString];
+
+    CFArrayRef windows = CGWindowListCopyWindowInfo(
+        kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+        kCGNullWindowID);
+    if (!windows) return 0;
+
+    uint32_t bestID  = 0;
+    CGFloat  bestArea = 0;
+    CFIndex  n = CFArrayGetCount(windows);
+
+    for (CFIndex i = 0; i < n; i++) {
+        NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows, i);
+
+        NSNumber *layer = w[(id)kCGWindowLayer];
+        if (layer && layer.intValue != 0) continue;
+
+        NSString *owner = [w[(id)kCGWindowOwnerName] lowercaseString];
+        if (!owner || ![owner containsString:appLower]) continue;
+
+        NSDictionary *bounds = w[(id)kCGWindowBounds];
+        if (!bounds) continue;
+        CGFloat area = [bounds[@"Width"] floatValue] * [bounds[@"Height"] floatValue];
+        if (area < 10000.0) continue;
+
+        if (area > bestArea) {
+            bestArea = area;
+            NSNumber *wid = w[(id)kCGWindowNumber];
+            bestID = wid ? (uint32_t)wid.unsignedIntValue : 0;
+        }
+    }
+    CFRelease(windows);
+    return bestID;
+}
+
+// Returns 1 if a window with window_id still exists in the full window list
+// (including hidden/minimized windows), 0 otherwise.
+int sh_cocoa_window_exists(uint32_t window_id) {
+    if (window_id == 0) return 0;
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
+    if (!windows) return 0;
+
+    BOOL found = NO;
+    CFIndex n = CFArrayGetCount(windows);
+    for (CFIndex i = 0; i < n && !found; i++) {
+        NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows, i);
+        NSNumber *wid = w[(id)kCGWindowNumber];
+        if (wid && (uint32_t)wid.unsignedIntValue == window_id) found = YES;
+    }
+    CFRelease(windows);
+    return found ? 1 : 0;
+}
+
+// Show a modal NSAlert asking whether to record the detected meeting.
+// Primary "record?" prompt — works without notification permission and produces
+// a clearly visible on-screen dialog. Dispatched to the main queue so it never
+// blocks the Rust callback thread. The choice is delivered via goRecordChoiceCallback().
+void sh_cocoa_show_record_alert(const char *app_cstr) {
+    NSString *app = app_cstr ? [NSString stringWithUTF8String:app_cstr] : @"Meeting";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Become a Regular app briefly so the alert gets focus and a Dock icon.
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+        [NSApp activateIgnoringOtherApps:YES];
+
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText     = @"Meeting Detected";
+        alert.informativeText = [NSString stringWithFormat:
+            @"%@ is active — record this meeting?", app];
+        alert.alertStyle      = NSAlertStyleInformational;
+        [alert addButtonWithTitle:@"\U0001F534  Record"];
+        [alert addButtonWithTitle:@"Skip"];
+
+        NSModalResponse resp = [alert runModal];
+        GoInt32 choice = (resp == NSAlertFirstButtonReturn) ? 1 : 0;
+        goRecordChoiceCallback(choice);
+
+        // Return to Accessory so the Dock icon disappears again.
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    });
 }
 
 // Post an actionable "Record this meeting?" notification.

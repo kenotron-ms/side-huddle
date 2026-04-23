@@ -150,6 +150,13 @@
             check_and_emit_permissions(&self.inner);
         }
 
+        /// Stop the active recording without halting the meeting monitor.
+        /// No-op if no recording is active. The accumulation thread will emit
+        /// RecordingEnded and RecordingReady after the WAV files are written.
+        pub fn stop_recording(&self) {
+            self.inner.meeting.lock().unwrap().recording = None;
+        }
+
         /// Start recording the current meeting.
         ///
         /// Call from within a [`Event::MeetingDetected`] handler to opt in.
