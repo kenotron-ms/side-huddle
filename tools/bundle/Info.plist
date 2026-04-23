@@ -33,8 +33,10 @@
          the "Record this meeting?" actionable notification to stay visible. -->
     <key>NSUserNotificationAlertStyle</key>
     <string>alert</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>SideHuddle captures your microphone audio during detected meetings so you can review them locally.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+        <string>SideHuddle captures system audio during detected meetings so you can review them locally. This uses the Core Audio process tap API.</string>
+        <key>NSMicrophoneUsageDescription</key>
+        <string>SideHuddle captures your microphone audio during detected meetings so you can review them locally.</string>
     <key>NSScreenCaptureUsageDescription</key>
     <string>SideHuddle taps system audio from Teams / Zoom / Meet during detected meetings so you can review them locally.</string>
 </dict>
