@@ -45,7 +45,7 @@ APP_VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null \
                       | sed 's/.*"\(.*\)".*/\1/')
 
 .PHONY: all build release go-lib run-demo run-demo-node run-demo-python \
-        bundle run-bundle install icon verify dist clean
+        bundle run-bundle install icon verify dist clean reset-tcc
 
 # ── Source targets ────────────────────────────────────────────────────────────
 
@@ -122,6 +122,14 @@ dist:
 	bash packaging/macos/package.sh arm64 "$(APP_VERSION)"
 
 # ── Housekeeping ──────────────────────────────────────────────────────────────
+
+reset-tcc:
+	-pkill -x SideHuddle 2>/dev/null || true
+	@sleep 1
+	tccutil reset ScreenCapture   com.ms.side-huddle
+	tccutil reset Microphone      com.ms.side-huddle
+	tccutil reset AudioCapture    com.ms.side-huddle
+	@echo "✓ TCC reset — run 'make run-bundle' to re-prompt"
 
 clean:
 	cargo clean
