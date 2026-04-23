@@ -252,11 +252,11 @@ API_AVAILABLE(macos(13.0))
     NSString *category = response.notification.request.content.categoryIdentifier;
 
     if ([category isEqualToString:kCatRecordChoice]) {
-        // Tapping the notification body or the "Record" button → record.
-        // Tapping "Skip" → do not record.
-        int shouldRecord = 1;
-        if ([action isEqualToString:kActSkip]) shouldRecord = 0;
-        goRecordChoiceCallback((GoInt32)shouldRecord);
+        // Notification-based record choice (fallback path).
+        // Route through the overlay action channel so the same goroutine
+        // handles both notification taps and overlay button taps.
+        const char *act = [action isEqualToString:kActSkip] ? "dismiss" : "record";
+        shOverlayAction((char *)act);
 
     } else if ([action isEqualToString:kActOpenFolder]) {
         NSString *folder = response.notification.request.content.userInfo[@"folder_path"];
@@ -554,8 +554,8 @@ void sh_cocoa_show_record_alert(const char *app_cstr) {
         [alert addButtonWithTitle:@"Skip"];
 
         NSModalResponse resp = [alert runModal];
-        GoInt32 choice = (resp == NSAlertFirstButtonReturn) ? 1 : 0;
-        goRecordChoiceCallback(choice);
+        const char *act = (resp == NSAlertFirstButtonReturn) ? "record" : "dismiss";
+        shOverlayAction((char *)act);
 
         // Return to Accessory so the Dock icon disappears again.
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];

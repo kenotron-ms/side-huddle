@@ -60,6 +60,7 @@ func runListener() {
 	// CGRequestScreenCaptureAccess self-dismissed in Accessory mode on macOS 26.
 	sh.RequestMicrophone()
 	sh.RequestScreenCapture()
+	shOverlayWarmup() // pre-create panel so first show is instant
 
 	listener := sh.New()
 
@@ -68,14 +69,6 @@ func runListener() {
 	baseDir := mustOutputBaseDir()
 	listener.SetOutputDir(baseDir)
 
-	// wavReadyEvent bundles a RecordingReady event with a frozen meeting
-	// snapshot so the transcription goroutine sees the correct 1:1 state
-	// even if a second meeting starts before the first is transcribed.
-	type wavReadyEvent struct {
-		ev      *sh.Event
-		meeting meetingState
-	}
-	wavReady := make(chan wavReadyEvent, 1)
 	var timeline []speakerEntry
 	var recordingStarted time.Time
 	var meeting meetingState
@@ -96,25 +89,27 @@ func runListener() {
 
 		case sh.MeetingDetected:
 			fmt.Printf("🟢  meeting detected: %s\n", e.App)
+			app := e.App
 			meeting = meetingState{
 				started:          time.Now(),
-				app:              e.App,
+				app:              app,
 				participantsSeen: make(map[string]bool),
 			}
-			// Post the notification and return immediately — blocking here would
+			// Show the overlay and return immediately — blocking here would
 			// stall the Rust-side CGo event dispatch and prevent MeetingEnded
 			// from ever firing (recording would never stop).
-			// The goroutine waits for the user's tap (or 30s timeout) then starts
-			// recording.  recordingStarted is set now so SpeakerChanged offsets
-			// are correct even if recording starts a few seconds later.
-			recordingStarted = time.Now()
-			ch := cocoaNotifyRecordChoice(e.App)
+			// The goroutine waits for the user's tap (or 60s timeout) then
+			// starts recording.  recordingStarted is set when the user confirms
+			// so SpeakerChanged offsets reflect actual recording time.
 			go func() {
-				if !waitRecordChoice(ch, 30*time.Second) {
-					fmt.Println("   skipping (user chose Skip).")
+				overlayMeetingDetected(app)
+				if !waitOverlayRecord() {
+					fmt.Println("   skipping.")
 					return
 				}
+				recordingStarted = time.Now()
 				fmt.Println("   recording.")
+				overlayRecording(app)
 				listener.Record()
 			}()
 
@@ -175,12 +170,29 @@ func runListener() {
 		case sh.RecordingReady:
 			organized := organizeRecording(e, meeting, baseDir)
 			cocoaSetRecording(false, "", "") // defensive — already cleared on RecordingEnded
-			folder := filepath.Dir(organized.Path)
-			cocoaNotifyWithFolder("Recording ready", filepath.Base(folder), folder)
-			select {
-			case wavReady <- wavReadyEvent{ev: organized, meeting: meeting}:
-			default:
-			}
+			fmt.Printf("💾  saved:\n")
+			fmt.Printf("    mixed  → %s\n", organized.Path)
+			fmt.Printf("    others → %s\n", organized.OthersPath)
+			fmt.Printf("    self   → %s\n\n", organized.SelfPath)
+			printTimeline(timeline, recordingStarted)
+			durationSec := int(time.Since(recordingStarted).Seconds())
+			overlayRecordingSaved(durationSec)
+			// Snapshot state for the transcription goroutine — a new meeting
+			// can start before the user taps Transcribe, so we freeze the current
+			// meeting's data here.
+			capturedOrganized := organized
+			capturedMeeting := meeting
+			capturedTimeline := append([]speakerEntry(nil), timeline...)
+			capturedRecStart := recordingStarted
+			go func() {
+				choice := waitOverlayPost()
+				if choice == "transcribe" {
+					overlayTranscribing()
+					runTranscription(capturedOrganized, capturedMeeting, capturedTimeline, capturedRecStart)
+					shOverlayHide()
+				}
+			}()
+			timeline = timeline[:0] // reset for the next meeting
 
 		case sh.CaptureStatus:
 			if !e.Capturing {
@@ -202,24 +214,11 @@ func runListener() {
 	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
 
 	// Keep the listener alive across meetings — this is a menu-bar agent, not
-	// a one-shot. Each RecordingReady prints the save summary + optional
-	// transcription, resets per-meeting state, and waits for the next meeting.
-	// Only ⌘Q (→ cocoaTerminate) or SIGINT breaks the loop.
-	for {
-		select {
-		case ready := <-wavReady:
-			ev := ready.ev
-			fmt.Printf("💾  saved:\n")
-			fmt.Printf("    mixed  → %s\n", ev.Path)
-			fmt.Printf("    others → %s\n", ev.OthersPath)
-			fmt.Printf("    self   → %s\n\n", ev.SelfPath)
-			printTimeline(timeline, recordingStarted)
-			runTranscription(ev, ready.meeting, timeline, recordingStarted)
-			timeline = timeline[:0] // clear for the next meeting
-		case <-quit:
-			fmt.Println("\nshutting down…")
-			return
-		}
+	// a one-shot. RecordingReady handles save + overlay inline; we just wait
+	// here for ⌘Q (→ cocoaTerminate) or SIGINT to shut down cleanly.
+	select {
+	case <-quit:
+		fmt.Println("\nshutting down…")
 	}
 }
 
