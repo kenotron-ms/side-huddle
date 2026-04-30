@@ -534,6 +534,36 @@ int sh_cocoa_window_exists(uint32_t window_id) {
     return found ? 1 : 0;
 }
 
+// Returns the current title of the window with the given CGWindowID.
+// Returns NULL when the window is gone or has no title (kCGWindowName missing
+// or empty). Caller must free() the returned string.
+//
+// Used by pollMeetingTitle to read the title FROM a specific window once
+// Phase 1 has identified the meeting window — picking-largest-each-tick
+// lets chat / pop-out windows clobber the meeting title when the user
+// opens a chat mid-meeting (e.g. a 1:1 DM whose title is just the contact
+// name and so doesn't match any chrome pattern).
+const char *sh_cocoa_window_title(uint32_t window_id) {
+    if (window_id == 0) return NULL;
+    CFArrayRef windows = CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID);
+    if (!windows) return NULL;
+
+    NSString *title = nil;
+    CFIndex n = CFArrayGetCount(windows);
+    for (CFIndex i = 0; i < n; i++) {
+        NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows, i);
+        NSNumber *wid = w[(id)kCGWindowNumber];
+        if (!wid || (uint32_t)wid.unsignedIntValue != window_id) continue;
+        NSString *t = w[(id)kCGWindowName];
+        if (t.length > 0) title = t;
+        break;
+    }
+    CFRelease(windows);
+
+    if (!title) return NULL;
+    return strdup([title UTF8String]);
+}
+
 // Show a modal NSAlert asking whether to record the detected meeting.
 // Primary "record?" prompt — works without notification permission and produces
 // a clearly visible on-screen dialog. Dispatched to the main queue so it never

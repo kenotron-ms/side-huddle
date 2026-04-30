@@ -15,6 +15,7 @@ void sh_cocoa_set_recording(int recording, const char *app, const char *title);
 const char *sh_cocoa_find_meeting_title(const char *app);
 uint32_t sh_cocoa_find_meeting_window_id(const char *app);
 int sh_cocoa_window_exists(uint32_t window_id);
+const char *sh_cocoa_window_title(uint32_t window_id);
 */
 import "C"
 
@@ -97,4 +98,18 @@ func cocoaFindMeetingWindowID(app string) uint32 {
 // still present in the full window list (including hidden/minimized windows).
 func cocoaWindowExists(id uint32) bool {
 	return C.sh_cocoa_window_exists(C.uint32_t(id)) != 0
+}
+
+// cocoaWindowTitle returns the current title of the window with the given
+// CGWindowID, or "" if the window is gone or has no title. Used by
+// pollMeetingTitle to read the title FROM the identified meeting window
+// instead of picking-largest-each-tick (which lets chat / pop-out windows
+// clobber the meeting title when the user opens a chat mid-meeting).
+func cocoaWindowTitle(id uint32) string {
+	ct := C.sh_cocoa_window_title(C.uint32_t(id))
+	if ct == nil {
+		return ""
+	}
+	defer C.free(unsafe.Pointer(ct))
+	return C.GoString(ct)
 }
