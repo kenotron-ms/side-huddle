@@ -241,6 +241,83 @@
         found
     }
 
+    /// Returns the current title of a window by ID, or `None` if the window
+    /// is no longer present or has no title.  Uses the full window list so
+    /// it returns a value even when the window is not currently on screen.
+    pub fn window_title(window_id: u32) -> Option<String> {
+        let array_ref: CFArrayRef = unsafe {
+            CGWindowListCopyWindowInfo(kCGWindowListOptionAll, kCGNullWindowID) as CFArrayRef
+        };
+        if array_ref.is_null() { return None; }
+
+        let count = unsafe { CFArrayGetCount(array_ref) };
+        let mut result = None;
+
+        for i in 0..count {
+            let item = unsafe { CFArrayGetValueAtIndex(array_ref, i) };
+            if item.is_null() { continue; }
+            let dict = item as CFDictionaryRef;
+            let Some(id) = dict_get_i32(dict, "kCGWindowNumber") else { continue };
+            if id as u32 != window_id { continue; }
+            result = dict_get_string(dict, "kCGWindowName").filter(|t| !t.is_empty());
+            break;
+        }
+
+        unsafe { CFRelease(array_ref as CFTypeRef); }
+        result
+    }
+
+    /// Returns `true` if `title` is a known non-meeting / chrome view title
+    /// for the given app `owner`.  The window watcher uses this to detect
+    /// meeting end when an app keeps the same window open across consecutive
+    /// meetings — Teams 2.x is the canonical case: leaving a call and joining
+    /// the next one from the calendar reuses the same `CGWindowID`, so plain
+    /// `window_exists` checks never fire `MeetingEnded`.
+    ///
+    /// Returns `false` for unknown owners (preserving prior behavior — only
+    /// window-disappearance triggers meeting end).
+    pub fn is_chrome_title(owner: &str, title: &str) -> bool {
+        if title.is_empty() { return true; }
+
+        match owner {
+            "Microsoft Teams" => is_teams_chrome_title(title),
+            "zoom.us"         => is_zoom_chrome_title(title),
+            _                 => false,
+        }
+    }
+
+    fn is_teams_chrome_title(title: &str) -> bool {
+        // Top-level tabs in the main window: "<TabName> | Microsoft Teams"
+        const TEAMS_CHROME_TABS: &[&str] = &[
+            "Calendar", "Chat", "Activity", "Files", "Apps",
+            "Teams", "Settings", "Search", "Help", "More", "Home",
+        ];
+        const TEAMS_SUFFIX: &str = " | Microsoft Teams";
+        if let Some(prefix) = title.strip_suffix(TEAMS_SUFFIX) {
+            if TEAMS_CHROME_TABS.contains(&prefix) {
+                return true;
+            }
+        }
+        // Detached pop-out tabs (chat threads, calendar event details,
+        // activity feed): "<Tab> | <names>" or "<Tab> - <names>". These
+        // are not meetings either.
+        const TEAMS_POPOUT_TABS: &[&str] = &["Chat", "Activity", "Teams", "Calendar", "Files"];
+        for tab in TEAMS_POPOUT_TABS {
+            if title.starts_with(&format!("{} | ", tab))
+                || title.starts_with(&format!("{} - ", tab))
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_zoom_chrome_title(title: &str) -> bool {
+        // Outside of a meeting Zoom shows the bare app name. In a meeting
+        // it's the topic, "Zoom Meeting", or "Zoom Meeting - <name>".
+        matches!(title, "Zoom" | "Zoom Workplace")
+    }
+
     /// Returns the bounds `(x, y, width, height)` of a window by ID.
     /// Uses the full window list (including hidden windows) so it works even
     /// when the window is not currently on screen.
@@ -322,4 +399,76 @@
             )
         };
         if ok { Some(n) } else { None }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::is_chrome_title;
+
+        #[test]
+        fn teams_top_level_tabs_are_chrome() {
+            for tab in &[
+                "Calendar", "Chat", "Activity", "Files", "Apps",
+                "Teams", "Settings", "Search", "Help", "More", "Home",
+            ] {
+                let title = format!("{} | Microsoft Teams", tab);
+                assert!(
+                    is_chrome_title("Microsoft Teams", &title),
+                    "expected {:?} to be chrome", title,
+                );
+            }
+        }
+
+        #[test]
+        fn teams_meeting_titles_are_not_chrome() {
+            for title in &[
+                "Weekly 1:1",
+                "Sprint planning",
+                "Adam / Nathan — Lobster × Devices Follow-Up",
+                "Connect Omar Shahine: Microsoft Plots New Copilot Features",
+            ] {
+                assert!(
+                    !is_chrome_title("Microsoft Teams", title),
+                    "expected {:?} to be a meeting", title,
+                );
+            }
+        }
+
+        #[test]
+        fn teams_popout_tabs_are_chrome() {
+            for title in &[
+                "Chat | Stephen Olesen",
+                "Chat - Omar / Phil Gerity - 1:1",
+                "Calendar | Charles Lamanna, Jeff Teper",
+                "Activity | Mentions",
+            ] {
+                assert!(
+                    is_chrome_title("Microsoft Teams", title),
+                    "expected {:?} to be a popout/chrome", title,
+                );
+            }
+        }
+
+        #[test]
+        fn zoom_chrome_recognized() {
+            assert!(is_chrome_title("zoom.us", "Zoom"));
+            assert!(is_chrome_title("zoom.us", "Zoom Workplace"));
+            assert!(!is_chrome_title("zoom.us", "Zoom Meeting"));
+            assert!(!is_chrome_title("zoom.us", "Sprint sync"));
+        }
+
+        #[test]
+        fn empty_title_is_chrome() {
+            assert!(is_chrome_title("Microsoft Teams", ""));
+            assert!(is_chrome_title("zoom.us", ""));
+            assert!(is_chrome_title("Some Other App", ""));
+        }
+
+        #[test]
+        fn unknown_owner_returns_false_for_real_titles() {
+            // Non-empty titles for unknown apps preserve prior behavior:
+            // window-disappearance is the only meeting-end signal.
+            assert!(!is_chrome_title("Slack", "general | Acme"));
+            assert!(!is_chrome_title("Webex", "Project Sync"));
+        }
     }
