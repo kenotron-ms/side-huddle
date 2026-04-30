@@ -139,6 +139,7 @@ API_AVAILABLE(macos(13.0))
     }
     gStatusItem.button.image = img;
     gStatusItem.button.title = @""; // always empty — title belongs in the dropdown
+    gStatusItem.visible = YES;      // re-assert: Tahoe can hide us between refreshes
 }
 
 - (void)toggleLoginItem:(id)sender {
@@ -285,6 +286,12 @@ void sh_cocoa_activate(void) {
 
     gStatusItem = [[NSStatusBar systemStatusBar]
         statusItemWithLength:NSSquareStatusItemLength];
+    // Give the item a stable identity so macOS doesn't orphan our slot when
+    // the menu bar is rebuilt (Space/display changes, SystemUIServer blips),
+    // and assert visibility — on Tahoe the menu-bar manager silently flips
+    // `visible` to NO under notch / overflow collisions.
+    gStatusItem.autosaveName = @"SideHuddleStatusItem";
+    gStatusItem.visible      = YES;
 
     NSImage *img = [NSImage imageWithSystemSymbolName:@"waveform.circle"
                               accessibilityDescription:@"SideHuddle"];
