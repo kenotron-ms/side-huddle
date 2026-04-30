@@ -723,6 +723,13 @@ func fileStemFromMeeting(m meetingState) string {
 //     window watcher. Phase 1 finds the primary meeting window by ID; Phase 2
 //     watches that ID for removal and calls l.StopRecording() when it's gone.
 //
+// Once Phase 1 has identified the meeting window, the title-update step
+// reads ONLY from that window's current title — picking-largest-each-tick
+// lets chat / DM pop-out windows steal the meeting title when the user
+// opens a chat mid-meeting (a 1:1 DM whose title is just the contact's
+// name doesn't match any chrome pattern, so filterWindowTitle lets it
+// through). Pinning to the identified window prevents that.
+//
 // The goroutine exits when `stop` is closed (i.e. when RecordingEnded fires).
 func pollMeetingTitle(app string, m *meetingState, l *sh.Listener, stop <-chan struct{}) {
 	ticker := time.NewTicker(3 * time.Second)
@@ -735,16 +742,7 @@ func pollMeetingTitle(app string, m *meetingState, l *sh.Listener, stop <-chan s
 		case <-stop:
 			return
 		case <-ticker.C:
-			// ── Title update ──────────────────────────────────────────────
-			raw := cocoaFindMeetingTitle(app)
-			t := filterWindowTitle(raw, app)
-			if t != "" && t != m.title {
-				fmt.Printf("📝  title (polled): %q\n", t)
-				m.title = t
-				cocoaSetRecording(true, m.app, t)
-			}
-
-			// ── Window-close detection (Go-side fallback) ─────────────────
+			// ── Window identification (Go-side fallback) ──────────────────
 			if watchID == 0 {
 				// Phase 1: find the primary meeting window by CGWindowID.
 				// cocoaFindMeetingWindowID picks the largest layer-0 window
@@ -760,6 +758,23 @@ func pollMeetingTitle(app string, m *meetingState, l *sh.Listener, stop <-chan s
 					l.StopRecording()
 					return
 				}
+			}
+
+			// ── Title update ──────────────────────────────────────────────
+			// Read the title FROM the identified window when we have one;
+			// fall back to "find largest" only during Phase 1 before we've
+			// locked onto a specific window.
+			var raw string
+			if watchID != 0 {
+				raw = cocoaWindowTitle(watchID)
+			} else {
+				raw = cocoaFindMeetingTitle(app)
+			}
+			t := filterWindowTitle(raw, app)
+			if t != "" && t != m.title {
+				fmt.Printf("📝  title (polled): %q\n", t)
+				m.title = t
+				cocoaSetRecording(true, m.app, t)
 			}
 		}
 	}
