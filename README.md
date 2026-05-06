@@ -4,11 +4,27 @@ Detect Teams, Zoom, and Google Meet meetings on your local machine and capture t
 
 **Supported platforms:** macOS (full) · Windows (stub) · Linux (stub)
 
-## Quick start
+---
+
+## SideHuddle App
+
+**macOS menu-bar app** that automatically detects meetings, records 3-stream audio (mixed, others, self), and transcribes locally with Whisper. No cloud. No API key.
+
+→ **[Download SideHuddle.dmg](https://github.com/kenotron-ms/side-huddle/releases/latest)** (macOS 14.2+, Apple Silicon)
+
+Open the DMG, drag to Applications, and launch. SideHuddle runs in the menu bar — it will prompt for microphone and screen recording permissions the first time it detects a meeting.
+
+---
+
+## Library
+
+For developers who want to embed meeting detection and recording in their own apps.
+
+### Quick start
 
 ```bash
-# Build everything + run the Go demo
-make run-demo
+# Build everything and run the app
+make run
 ```
 
 Pick your language:
@@ -126,17 +142,21 @@ dot -Tsvg docs/architecture.dot -o docs/architecture.svg && open docs/architectu
 ## Repository structure
 
 ```
-crates/
-  side-huddle/            Rust core library (rlib + cdylib)
-  side-huddle-node/       napi-rs Node.js native addon
-bindings/
-  go/                     Go CGo bindings (wraps cdylib)
-  python/                 Python ctypes bindings (wraps cdylib)
-  node/                   Node.js demo
 cmd/
-  demo/                   Go demo
+  side-huddle/             macOS menu-bar app (the product)
+crates/
+  side-huddle/             Rust core library (rlib + cdylib)
+  side-huddle-node/        napi-rs Node.js native addon
+bindings/
+  go/                      Go CGo bindings (wraps cdylib)
+  python/                  Python ctypes bindings (wraps cdylib)
+  node/                    Node.js demo script
 include/
-  side_huddle.h           C header (for C/C++ consumers)
+  side_huddle.h            C header (for C/C++ consumers)
+tools/
+  bundle/                  macOS app bundle assets (icon, plist, entitlements)
+packaging/
+  macos/                   Sign → notarize → staple → DMG pipeline
 ```
 
 ## Build requirements
@@ -144,7 +164,7 @@ include/
 | Dependency | Version | Notes |
 |---|---|---|
 | **Rust** | 1.78+ | Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin` |
-| **Go** | 1.22+ | For Go bindings |
+| **Go** | 1.22+ | For Go bindings and the app |
 | **Node.js** | 18+ | For Node.js bindings |
 | **Python** | 3.9+ | For Python bindings (pure ctypes, no compilation) |
 | **macOS** | 14.2+ | Required for system audio tap; detection works on earlier versions |
@@ -154,9 +174,12 @@ include/
 ```
 make build               # Debug Rust build + verify Go
 make release             # napi build --platform --release (also builds cdylib)
-make run-demo            # Go demo
+make run                 # Build and run the app
 make run-demo-node       # Node.js demo
 make run-demo-python     # Python demo
+make bundle              # Build .app bundle (ad-hoc signed, for your machine only)
+make install             # Install to /Applications
+make dist                # Full release: sign + notarize + staple + DMG
 make clean
 ```
 

@@ -67,7 +67,7 @@ cp target/release/libside_huddle.a "$GO_LIB_DIR/libside_huddle.a"
 
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
-go build -a -o "$APP_DIR/Contents/MacOS/SideHuddle" ./cmd/demo
+go build -a -o "$APP_DIR/Contents/MacOS/SideHuddle" ./cmd/side-huddle
 
 cp "$INFO_PLIST_TPL"  "$APP_DIR/Contents/Info.plist"
 cp "$ICNS"            "$APP_DIR/Contents/Resources/SideHuddle.icns"

@@ -2,7 +2,7 @@
 #
 # ── Dev workflow ──────────────────────────────────────────────────────────────
 #   make                  debug build (cargo + go)
-#   make run-demo         run the Go demo from the terminal
+#   make run              run the app from the terminal
 #   make bundle           .app bundle (ad-hoc signed, for your machine only)
 #   make run-bundle       bundle → open via LaunchServices
 #   make install          bundle → /Applications (local dev)
@@ -44,7 +44,7 @@ APP_VERSION ?= $(shell git describe --tags --abbrev=0 2>/dev/null \
                  || grep '^version' Cargo.toml | head -1 \
                       | sed 's/.*"\(.*\)".*/\1/')
 
-.PHONY: all build release go-lib run-demo run-demo-node run-demo-python \
+.PHONY: all build release go-lib run run-demo-node run-demo-python \
         bundle run-bundle install icon verify dist clean reset-tcc
 
 # ── Source targets ────────────────────────────────────────────────────────────
@@ -68,11 +68,11 @@ go-lib:
 	cargo build --release -p side-huddle
 	cp $(DYLIB_DIR)/libside_huddle.a $(GO_LIB_DIR)/libside_huddle.a
 
-DEMO_BIN := /tmp/side-huddle-demo
+APP_BIN := /tmp/side-huddle
 
-run-demo: go-lib release
-	go build -a -o $(DEMO_BIN) ./cmd/demo
-	$(DEMO_BIN)
+run: go-lib
+	go build -a -o $(APP_BIN) ./cmd/side-huddle
+	$(APP_BIN)
 
 run-demo-node: release
 	node bindings/node/demo.js
@@ -85,7 +85,7 @@ run-demo-python:
 bundle: go-lib tools/bundle/SideHuddle.icns
 	rm -rf $(APP_DIR)
 	mkdir -p $(APP_DIR)/Contents/MacOS $(APP_DIR)/Contents/Resources
-	go build -a -o $(APP_DIR)/Contents/MacOS/SideHuddle ./cmd/demo
+	go build -a -o $(APP_DIR)/Contents/MacOS/SideHuddle ./cmd/side-huddle
 	cp $(INFO_PLIST) $(APP_DIR)/Contents/Info.plist
 	cp tools/bundle/SideHuddle.icns $(APP_DIR)/Contents/Resources/SideHuddle.icns
 	plutil -replace CFBundleIdentifier          -string "com.ms.side-huddle"  $(APP_DIR)/Contents/Info.plist
