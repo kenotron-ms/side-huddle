@@ -69,3 +69,6 @@ scripts/
 Thumbs.db
 ehthumbs.db
 .worktrees/
+
+# \u2500\u2500 Brainstorm session files (visual companion) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+.superpowers/
