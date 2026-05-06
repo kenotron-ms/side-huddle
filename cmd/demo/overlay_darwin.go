@@ -145,6 +145,18 @@ func overlayTranscribing() {
 	})
 }
 
+// overlayTranscribingSaved is shown immediately after RecordingReady when
+// auto-transcribe is on (the default). It announces the saved duration and
+// signals that transcription is now running locally.
+func overlayTranscribingSaved(durationSec int) {
+	mins, secs := durationSec/60, durationSec%60
+	shOverlayShow(overlayState{
+		Title: "Recording saved",
+		Sub:   fmt.Sprintf("%dm %ds \u00b7 transcribing locally\u2026", mins, secs),
+		Dot:   "blue",
+	})
+}
+
 // waitOverlayRecord blocks until the user taps Record or Dismiss in the overlay,
 // or 60 s elapses (returns false — skip recording).
 func waitOverlayRecord() bool {

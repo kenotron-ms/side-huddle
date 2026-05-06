@@ -401,10 +401,14 @@ void sh_cocoa_terminate(void) {
     dispatch_async(dispatch_get_main_queue(), ^{ [NSApp terminate:nil]; });
 }
 
-// Scan on-screen windows for a meeting-looking title owned by `app`.
-// Returns a heap-allocated UTF-8 string (caller must free) or NULL.
-// Requires Screen Recording permission to read window titles — which we have
-// by the time we're recording, so the scan is reliable from that point on.
+// Scan on-screen windows owned by `app` and return ALL non-empty titles as a
+// newline-joined UTF-8 string (caller must free) or NULL if there are none.
+// The Go side scores them and picks the most meeting-shaped one — doing the
+// scoring here would mean duplicating the chat-vs-meeting heuristic across
+// languages.
+//
+// Requires Screen Recording permission to read window titles, which we have
+// by the time we're recording.
 const char *sh_cocoa_find_meeting_title(const char *app) {
     if (!app) return NULL;
     NSString *appName = [NSString stringWithUTF8String:app];
@@ -414,11 +418,7 @@ const char *sh_cocoa_find_meeting_title(const char *app) {
         kCGNullWindowID);
     if (!windows) return NULL;
 
-    NSArray *chromeTitles = @[@"Calendar", @"Chat", @"Activity", @"Files",
-                              @"Apps", @"Teams", @"Settings", @"Search",
-                              @"Help", @"More", @"Home"];
-
-    NSString *best = nil;
+    NSMutableArray<NSString *> *titles = [NSMutableArray array];
     CFIndex n = CFArrayGetCount(windows);
     for (CFIndex i = 0; i < n; i++) {
         NSDictionary *w = (__bridge NSDictionary *)CFArrayGetValueAtIndex(windows, i);
@@ -427,21 +427,13 @@ const char *sh_cocoa_find_meeting_title(const char *app) {
         if (![ownerName isEqualToString:appName]) continue;
         if (title.length == 0)                    continue;
         if ([title isEqualToString:appName])      continue;
-
-        if ([appName isEqualToString:@"Microsoft Teams"] &&
-            [title hasSuffix:@" | Microsoft Teams"]) {
-            NSString *prefix = [title substringToIndex:
-                title.length - @" | Microsoft Teams".length];
-            if ([chromeTitles containsObject:prefix]) continue;
-        }
-
-        best = title;
-        break;
+        [titles addObject:title];
     }
     CFRelease(windows);
 
-    if (!best) return NULL;
-    return strdup([best UTF8String]);
+    if (titles.count == 0) return NULL;
+    NSString *joined = [titles componentsJoinedByString:@"\n"];
+    return strdup([joined UTF8String]);
 }
 
 // Set/clear the menu-bar recording indicator. Thread-safe — hops to main.
