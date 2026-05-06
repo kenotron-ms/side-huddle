@@ -1,11 +1,9 @@
 # ── Rust ─────────────────────────────────────────────────────────────────────
 target/
-Cargo.lock         # omit for binaries; keep for libraries — see docs
 
 # ── Go ───────────────────────────────────────────────────────────────────────
-# compiled binaries (name matches cmd/ directory names)
-/demo
-/cmd/demo/demo
+# compiled Go app binary
+/cmd/side-huddle/side-huddle
 
 # ── Node.js ───────────────────────────────────────────────────────────────────
 node_modules/
