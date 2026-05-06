@@ -177,21 +177,17 @@ func runListener() {
 			fmt.Printf("    self   → %s\n\n", organized.SelfPath)
 			printTimeline(timeline, recordingStarted)
 			durationSec := int(time.Since(recordingStarted).Seconds())
-			overlayRecordingSaved(durationSec)
+			overlayTranscribingSaved(durationSec)
 			// Snapshot state for the transcription goroutine — a new meeting
-			// can start before the user taps Transcribe, so we freeze the current
-			// meeting's data here.
+			// can start before transcription finishes, so we freeze the
+			// current meeting's data here.
 			capturedOrganized := organized
 			capturedMeeting := meeting
 			capturedTimeline := append([]speakerEntry(nil), timeline...)
 			capturedRecStart := recordingStarted
 			go func() {
-				choice := waitOverlayPost()
-				if choice == "transcribe" {
-					overlayTranscribing()
-					offerTranscription(&sh.Event{Path: capturedOrganized.Path, OthersPath: capturedOrganized.OthersPath, SelfPath: capturedOrganized.SelfPath}, capturedMeeting, capturedTimeline, capturedRecStart)
-					shOverlayHide()
-				}
+				offerTranscription(&sh.Event{Path: capturedOrganized.Path, OthersPath: capturedOrganized.OthersPath, SelfPath: capturedOrganized.SelfPath}, capturedMeeting, capturedTimeline, capturedRecStart)
+				shOverlayHide()
 			}()
 			timeline = timeline[:0] // reset for the next meeting
 
@@ -290,13 +286,21 @@ type transcriptResult struct {
 }
 
 func offerTranscription(ev *sh.Event, m meetingState, timeline []speakerEntry, recStart time.Time) {
-	if _, err := exec.LookPath("whisper-cli"); err != nil {
+	whisperBin := findWhisperCli()
+	if whisperBin == "" {
+		// LaunchServices launches the .app with PATH=/usr/bin:/bin (no
+		// /opt/homebrew/bin), so a plain `whisper-cli` LookPath returns
+		// "not found" even when whisper-cpp is installed via Homebrew.
+		// Surface this via a notification so the user knows transcription
+		// silently skipped — the previous version returned silently here.
 		fmt.Println("(install whisper-cpp to enable local transcription: brew install whisper-cpp)")
+		cocoaNotify("Transcription skipped", "whisper-cli not found — install with `brew install whisper-cpp`")
 		return
 	}
 	modelPath := whisperModelPath()
 	if _, err := os.Stat(modelPath); err != nil {
 		fmt.Printf("(whisper model not found at %s — download a .bin from huggingface.co/ggerganov/whisper.cpp)\n", modelPath)
+		cocoaNotify("Transcription skipped", fmt.Sprintf("whisper model not found at %s", modelPath))
 		return
 	}
 	// .en.bin variants are English-only: whisper-cli silently ignores -l for
@@ -343,7 +347,7 @@ func offerTranscription(ev *sh.Event, m meetingState, timeline []speakerEntry, r
 				return
 			}
 			fmt.Printf("📝  transcribing %s…\n", r.label)
-			segs, err := transcribeWAV(r.path)
+			segs, err := transcribeWAV(r.path, whisperBin)
 			ch <- transcriptResult{r.label, r.path, segs, err}
 		}()
 	}
@@ -532,10 +536,30 @@ func whisperConcurrency() int {
 	return 1
 }
 
+// findWhisperCli resolves the whisper-cli binary even when the process was
+// launched by LaunchServices (Finder / `open Foo.app`), where /opt/homebrew/bin
+// is not on PATH. Falls through Homebrew's standard install locations so we
+// don't silently disable transcription for bundle launches.
+func findWhisperCli() string {
+	if p, err := exec.LookPath("whisper-cli"); err == nil {
+		return p
+	}
+	for _, p := range []string{
+		"/opt/homebrew/bin/whisper-cli", // Apple Silicon Homebrew
+		"/usr/local/bin/whisper-cli",    // Intel Homebrew
+	} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
 // transcribeWAV runs `whisper-cli` against the given WAV and parses the JSON
 // output into speech segments. whisper-cli writes JSON to "<path>.json"; we
 // read that file and delete it to avoid cluttering the recordings folder.
-func transcribeWAV(wavPath string) ([]segment, error) {
+// `whisperBin` is the absolute path to the binary (see findWhisperCli).
+func transcribeWAV(wavPath, whisperBin string) ([]segment, error) {
 	model := whisperModelPath()
 	verbose := os.Getenv("WHISPER_VERBOSE") != ""
 
@@ -565,7 +589,7 @@ func transcribeWAV(wavPath string) ([]segment, error) {
 		args = append(args, "--vad", "--vad-model", vadModel, "--vad-thold", "0.5")
 	}
 
-	cmd := exec.Command("whisper-cli", args...)
+	cmd := exec.Command(whisperBin, args...)
 	if verbose {
 		cmd.Stderr = os.Stderr
 		cmd.Stdout = os.Stdout
@@ -736,8 +760,11 @@ func pollMeetingTitle(app string, m *meetingState, l *sh.Listener, stop <-chan s
 			return
 		case <-ticker.C:
 			// ── Title update ──────────────────────────────────────────────
-			raw := cocoaFindMeetingTitle(app)
-			t := filterWindowTitle(raw, app)
+			// Iterate every window owned by the meeting app and pick the
+			// most meeting-shaped title. CGWindowList z-order alone is
+			// unreliable: a Teams chat tab the user clicked while joining
+			// can win the front-most race over the actual meeting window.
+			t := pickBestMeetingTitle(cocoaFindMeetingTitles(app), app)
 			if t != "" && t != m.title {
 				fmt.Printf("📝  title (polled): %q\n", t)
 				m.title = t
@@ -765,15 +792,49 @@ func pollMeetingTitle(app string, m *meetingState, l *sh.Listener, stop <-chan s
 	}
 }
 
-// filterWindowTitle drops window titles that are clearly app chrome (e.g.,
-// the Teams main window showing "Calendar | Microsoft Teams") and returns
-// the original title otherwise. Returning "" means "no useful title" — the
-// caller keeps whatever meeting name it already had.
+// pickBestMeetingTitle scores every candidate window title and returns the
+// one most likely to belong to the actual meeting window (vs a chat tab or
+// app chrome). Returns "" when nothing scores positively — caller keeps
+// whatever title it already had.
 //
-// The window watcher in the Rust core grabs the first visible window from
-// the meeting app's process; if the user has Teams open on the Calendar tab
-// while a call is in progress, that chrome window can win the race over the
-// actual call window.
+// Why this exists: the Rust window watcher and CGWindowList z-order both
+// pick the front-most window, but Teams puts chat tabs and meeting windows
+// in the same z-pool. If the user clicked a chat tab while joining a call,
+// the chat title wins the race and ends up as the recording's name.
+func pickBestMeetingTitle(titles []string, app string) string {
+	bestScore := 0
+	best := ""
+	for _, raw := range titles {
+		cleaned := filterWindowTitle(raw, app)
+		if cleaned == "" {
+			continue
+		}
+		// Score on the raw title so signals like a leading time range
+		// ("9:00-10:00 …") still count — those get stripped during clean.
+		s := meetingTitleScore(raw, cleaned, app)
+		if s > bestScore {
+			bestScore = s
+			best = cleaned
+		}
+	}
+	return best
+}
+
+// teamsChromeTabs are the top-level Teams nav tabs. A title starting with one
+// of these followed by " | " is a tab title, never a meeting.
+var teamsChromeTabs = []string{
+	"Calendar", "Chat", "Activity", "Files", "Apps", "Teams",
+	"Settings", "Search", "Help", "More", "Home",
+}
+
+// teamsTimePrefix matches "9:00", "9:00 AM", "9:00-10:00", "9:00 - 10:00 PM"
+// at the start of a Teams meeting title.
+var teamsTimePrefix = regexp.MustCompile(
+	`^\d{1,2}:\d{2}(?:\s*(?:AM|PM))?(?:\s*[-–—]\s*\d{1,2}:\d{2}(?:\s*(?:AM|PM))?)?\s+`)
+
+// filterWindowTitle drops window titles that are clearly NOT a meeting (chat
+// tabs, app chrome) and returns a cleaned-up version of the rest. Returning ""
+// means "definitely not a meeting" — caller skips it.
 func filterWindowTitle(title, app string) string {
 	title = strings.TrimSpace(title)
 	if title == "" || title == app {
@@ -781,31 +842,67 @@ func filterWindowTitle(title, app string) string {
 	}
 	switch app {
 	case "Microsoft Teams":
-		// Teams chrome titles take the shape "<TabName> | Microsoft Teams".
-		// Drop those — real meeting windows use "<MeetingName> | Microsoft Teams"
-		// but the tab names (Calendar, Chat, etc.) are enumerable; anything
-		// outside this list is likely a real meeting.
-		chromeTabs := []string{"Calendar", "Chat", "Activity", "Files", "Apps",
-			"Teams", "Settings", "Search", "Help", "More", "Home"}
+		// Tab title: "<TabName> | <Context>" (e.g., "Chat | Amanda Silver",
+		// "Calendar | Microsoft Teams"). Always drop.
+		for _, tab := range teamsChromeTabs {
+			if strings.HasPrefix(title, tab+" | ") {
+				return ""
+			}
+		}
+		// Older Teams: "<X> | Microsoft Teams". Strip the suffix; if the
+		// remainder is just a chrome tab name, drop it.
 		if strings.HasSuffix(title, " | Microsoft Teams") {
 			prefix := strings.TrimSuffix(title, " | Microsoft Teams")
-			for _, tab := range chromeTabs {
+			for _, tab := range teamsChromeTabs {
 				if prefix == tab {
 					return ""
 				}
 			}
-			// Real meeting — strip the Teams-inserted junk (time prefix,
-			// bracketed channel/room tags) down to the semantic title.
 			return cleanTeamsMeetingTitle(prefix)
 		}
 	case "zoom.us", "Zoom":
-		// Zoom's main window is just "Zoom" or "Zoom Meetings"; real meeting
-		// windows have the meeting ID/name.
 		if title == "Zoom" || title == "Zoom Meetings" {
 			return ""
 		}
 	}
 	return title
+}
+
+// meetingTitleScore returns how likely a window title belongs to a real
+// meeting (rather than a chat tab that slipped through filterWindowTitle).
+// Bigger = more meeting-like. Thresholds tuned to observed Teams titles:
+//
+//   - Leading time range on the raw title ("9:00-10:00 …"): a Teams calendar
+//     meeting window, near-certain. +20.
+//   - Structural separators on the cleaned title (— / + < > ()): meeting
+//     subjects almost always have one ("Internal- GE Aerospace - …",
+//     "Omar (Microsoft) <> Stuart Brown + …"). +5 each, capped at +20.
+//   - 4+ words: descriptive meeting name like "Project Lobster Review". +3.
+//   - Bare 1–2 words with no separators (e.g. a person's name): score 1,
+//     used only when nothing better is available.
+func meetingTitleScore(raw, cleaned, app string) int {
+	if cleaned == "" {
+		return 0
+	}
+	score := 1
+	if app == "Microsoft Teams" && teamsTimePrefix.MatchString(raw) {
+		score += 20
+	}
+	separators := 0
+	for _, r := range cleaned {
+		switch r {
+		case '—', '–', '/', '+', '<', '>', '(', ')':
+			separators++
+		}
+	}
+	if separators > 4 {
+		separators = 4
+	}
+	score += separators * 5
+	if words := strings.Fields(cleaned); len(words) >= 4 {
+		score += 3
+	}
+	return score
 }
 
 // Teams decorates meeting window titles with a leading time range and

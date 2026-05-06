@@ -20,6 +20,7 @@ import "C"
 
 import (
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -54,20 +55,23 @@ func cocoaNotify(title, body string) {
 	C.sh_cocoa_notify(ct, cb)
 }
 
-// cocoaFindMeetingTitle scans on-screen windows for a non-chrome window owned
-// by `app` and returns its title. Returns "" if none is found. The Rust core's
-// window watcher is lazy and emits MeetingUpdated only once at detection, so
-// we poll this periodically to pick up the meeting window once the user has
-// it in the foreground.
-func cocoaFindMeetingTitle(app string) string {
+// cocoaFindMeetingTitles returns every non-empty window title currently owned
+// by `app` in CGWindowList z-order (front-most first). Caller is expected to
+// score them and pick the most meeting-shaped one — the ObjC side intentionally
+// does no filtering so the chat-vs-meeting heuristic lives in one place (Go).
+func cocoaFindMeetingTitles(app string) []string {
 	ca := C.CString(app)
 	defer C.free(unsafe.Pointer(ca))
 	ct := C.sh_cocoa_find_meeting_title(ca)
 	if ct == nil {
-		return ""
+		return nil
 	}
 	defer C.free(unsafe.Pointer(ct))
-	return C.GoString(ct)
+	joined := C.GoString(ct)
+	if joined == "" {
+		return nil
+	}
+	return strings.Split(joined, "\n")
 }
 
 // cocoaSetRecording flips the menu-bar icon + title to reflect an in-progress
